@@ -781,9 +781,9 @@ impl WalletApp {
 
     fn render_top_bar(&mut self, ui: &mut Ui) {
         let status_text = if self.bridge.is_some() {
-            "Local bridge online"
+            "Bridge online"
         } else {
-            "Bridge unavailable"
+            "Bridge offline"
         };
         let daemon_state = self
             .daemon_status
@@ -801,15 +801,9 @@ impl WalletApp {
 
                 if compact {
                     ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new("Kaspa Multisig Control Room")
-                                .text_style(egui::TextStyle::Name("Hero".into()))
-                                .color(INK),
-                        );
-                        supporting_text(
-                            ui,
-                            "Create or import cosigners, connect to a Kaspa node, and move multisig bundles from unsigned to final broadcast.",
-                        );
+                        render_header_title(ui);
+                        supporting_text(ui, "Create or import cosigners, connect to a Kaspa node, and move multisig bundles from unsigned to final broadcast.");
+                        ui.add_space(8.0);
                         ui.horizontal_wrapped(|ui| {
                             status_chip(
                                 ui,
@@ -842,15 +836,8 @@ impl WalletApp {
                 } else {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new("Kaspa Multisig Control Room")
-                                    .text_style(egui::TextStyle::Name("Hero".into()))
-                                    .color(INK),
-                            );
-                            supporting_text(
-                                ui,
-                                "Create or import cosigners, connect to a Kaspa node, and move multisig bundles from unsigned to final broadcast.",
-                            );
+                            render_header_title(ui);
+                            supporting_text(ui, "Create or import cosigners, connect to a Kaspa node, and move multisig bundles from unsigned to final broadcast.");
                         });
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -866,23 +853,25 @@ impl WalletApp {
                                             .fit_to_exact_size(egui::vec2(144.0, 46.0)),
                                     );
                                 });
-                                ui.add_space(12.0);
                             }
-                            status_chip(
-                                ui,
-                                &daemon_state,
-                                state_color(
-                                    self.daemon_status
-                                        .as_ref()
-                                        .map(|state| state.state.as_str()),
-                                ),
-                            );
-                            status_chip(
-                                ui,
-                                status_text,
-                                if self.bridge.is_some() { TEAL } else { WARM_RED },
-                            );
                         });
+                    });
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        status_chip(
+                            ui,
+                            status_text,
+                            if self.bridge.is_some() { TEAL } else { WARM_RED },
+                        );
+                        status_chip(
+                            ui,
+                            &daemon_state,
+                            state_color(
+                                self.daemon_status
+                                    .as_ref()
+                                    .map(|state| state.state.as_str()),
+                            ),
+                        );
                     });
                 }
             });
@@ -1573,6 +1562,14 @@ fn section_card<R>(
             add_contents(ui)
         })
         .inner
+}
+
+fn render_header_title(ui: &mut Ui) {
+    ui.label(
+        RichText::new("Kaspa Multisig Control Room")
+            .text_style(egui::TextStyle::Name("Hero".into()))
+            .color(INK),
+    );
 }
 
 fn side_card<R>(
