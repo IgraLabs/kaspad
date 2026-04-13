@@ -803,6 +803,8 @@ impl WalletApp {
                     ui.vertical(|ui| {
                         render_header_title(ui);
                         supporting_text(ui, "Create or import cosigners, connect to a Kaspa node, and move multisig bundles from unsigned to final broadcast.");
+                        ui.add_space(10.0);
+                        render_brand_lockup(ui, self.logo_texture.as_ref(), true);
                         ui.add_space(8.0);
                         ui.horizontal_wrapped(|ui| {
                             status_chip(
@@ -819,18 +821,6 @@ impl WalletApp {
                                         .map(|state| state.state.as_str()),
                                 ),
                             );
-                            if let Some(texture) = &self.logo_texture {
-                                ui.add_space(4.0);
-                                ui.label(
-                                    RichText::new("igralabs.com")
-                                        .small()
-                                        .color(TEXT_SOFT),
-                                );
-                                ui.add(
-                                    egui::Image::new(texture)
-                                        .fit_to_exact_size(egui::vec2(132.0, 42.0)),
-                                );
-                            }
                         });
                     });
                 } else {
@@ -841,19 +831,7 @@ impl WalletApp {
                         });
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if let Some(texture) = &self.logo_texture {
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        RichText::new("igralabs.com")
-                                            .small()
-                                            .color(TEXT_SOFT),
-                                    );
-                                    ui.add(
-                                        egui::Image::new(texture)
-                                            .fit_to_exact_size(egui::vec2(144.0, 46.0)),
-                                    );
-                                });
-                            }
+                            render_brand_lockup(ui, self.logo_texture.as_ref(), false);
                         });
                     });
                     ui.add_space(10.0);
@@ -1570,6 +1548,40 @@ fn render_header_title(ui: &mut Ui) {
             .text_style(egui::TextStyle::Name("Hero".into()))
             .color(INK),
     );
+}
+
+fn render_brand_lockup(ui: &mut Ui, logo_texture: Option<&egui::TextureHandle>, compact: bool) {
+    let logo_size = if compact {
+        egui::vec2(164.0, 52.0)
+    } else {
+        egui::vec2(184.0, 58.0)
+    };
+
+    Frame::none()
+        .fill(CREAM)
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .rounding(egui::Rounding::same(16.0))
+        .stroke(Stroke::new(1.0, STROKE))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Built by").small().color(TEXT_SOFT));
+                if let Some(texture) = logo_texture {
+                    ui.add(
+                        egui::Image::new(texture)
+                            .fit_to_exact_size(logo_size)
+                            .maintain_aspect_ratio(true),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("IGRA LABS")
+                            .strong()
+                            .color(INK)
+                            .text_style(egui::TextStyle::Name("Section".into())),
+                    );
+                }
+                ui.label(RichText::new("igralabs.com").small().color(TEAL));
+            });
+        });
 }
 
 fn side_card<R>(
