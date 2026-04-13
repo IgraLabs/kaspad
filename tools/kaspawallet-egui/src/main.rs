@@ -1552,35 +1552,38 @@ fn render_header_title(ui: &mut Ui) {
 
 fn render_brand_lockup(ui: &mut Ui, logo_texture: Option<&egui::TextureHandle>, compact: bool) {
     let logo_size = if compact {
-        egui::vec2(164.0, 52.0)
+        egui::vec2(188.0, 60.0)
     } else {
-        egui::vec2(184.0, 58.0)
+        egui::vec2(212.0, 68.0)
     };
 
     Frame::none()
-        .fill(CREAM)
-        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .fill(Color32::from_rgb(238, 247, 245))
+        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
         .rounding(egui::Rounding::same(16.0))
-        .stroke(Stroke::new(1.0, STROKE))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(170, 210, 203)))
         .show(ui, |ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Built by").small().color(TEXT_SOFT));
-                if let Some(texture) = logo_texture {
-                    ui.add(
-                        egui::Image::new(texture)
-                            .fit_to_exact_size(logo_size)
-                            .maintain_aspect_ratio(true),
-                    );
-                } else {
+            if let Some(texture) = logo_texture {
+                ui.add(
+                    egui::Image::new(texture)
+                        .fit_to_exact_size(logo_size)
+                        .maintain_aspect_ratio(true),
+                );
+            } else {
+                ui.vertical(|ui| {
                     ui.label(
                         RichText::new("IGRA LABS")
                             .strong()
-                            .color(INK)
+                            .color(Color32::from_rgb(9, 35, 37))
                             .text_style(egui::TextStyle::Name("Section".into())),
                     );
-                }
-                ui.label(RichText::new("igralabs.com").small().color(TEAL));
-            });
+                    ui.label(
+                        RichText::new("igralabs.com")
+                            .small()
+                            .color(Color32::from_rgb(18, 94, 82)),
+                    );
+                });
+            }
         });
 }
 
