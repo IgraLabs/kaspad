@@ -8,7 +8,9 @@ use backend::{
     NewAddressResponse, ParseRequest, SessionConfigRequest, SignRequest, TransactionBundle,
     WalletSummary, WalletSummaryRequest,
 };
-use eframe::egui::{self, Align, Color32, ComboBox, Frame, Layout, RichText, Stroke, TextEdit, Ui};
+use eframe::egui::{
+    self, Align, Color32, ComboBox, Frame, Label, Layout, RichText, Stroke, TextEdit, Ui,
+};
 use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -29,8 +31,8 @@ const OLIVE: Color32 = Color32::from_rgb(112, 199, 186);
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1480.0, 980.0])
-            .with_min_inner_size([1200.0, 780.0])
+            .with_inner_size([1440.0, 960.0])
+            .with_min_inner_size([1040.0, 720.0])
             .with_title("Kaspa Multisig Control Room"),
         ..Default::default()
     };
@@ -795,37 +797,94 @@ impl WalletApp {
             .rounding(egui::Rounding::same(18.0))
             .stroke(Stroke::new(1.0, STROKE))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                let compact = ui.available_width() < 1120.0;
+
+                if compact {
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new("Kaspa Multisig Control Room")
                                 .text_style(egui::TextStyle::Name("Hero".into()))
                                 .color(INK),
                         );
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(
-                                "Bootstrap with shared kpub exchange, point the wallet at a Kaspa node RPC, and let the app manage the internal wallet engine through unsigned -> partial -> fully signed -> broadcast.",
-                            )
-                            .color(TEXT_SOFT),
+                        supporting_text(
+                            ui,
+                            "Create or import cosigners, connect to a Kaspa node, and move multisig bundles from unsigned to final broadcast.",
                         );
-                    });
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if let Some(texture) = &self.logo_texture {
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new("igralabs.com").small().color(TEXT_SOFT));
+                        ui.horizontal_wrapped(|ui| {
+                            status_chip(
+                                ui,
+                                status_text,
+                                if self.bridge.is_some() { TEAL } else { WARM_RED },
+                            );
+                            status_chip(
+                                ui,
+                                &daemon_state,
+                                state_color(
+                                    self.daemon_status
+                                        .as_ref()
+                                        .map(|state| state.state.as_str()),
+                                ),
+                            );
+                            if let Some(texture) = &self.logo_texture {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new("igralabs.com")
+                                        .small()
+                                        .color(TEXT_SOFT),
+                                );
                                 ui.add(
                                     egui::Image::new(texture)
-                                        .fit_to_exact_size(egui::vec2(157.0, 50.0)),
+                                        .fit_to_exact_size(egui::vec2(132.0, 42.0)),
                                 );
-                            });
-                            ui.add_space(14.0);
-                        }
-                        status_chip(ui, &daemon_state, state_color(self.daemon_status.as_ref().map(|state| state.state.as_str())));
-                        status_chip(ui, status_text, if self.bridge.is_some() { TEAL } else { WARM_RED });
+                            }
+                        });
                     });
-                });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("Kaspa Multisig Control Room")
+                                    .text_style(egui::TextStyle::Name("Hero".into()))
+                                    .color(INK),
+                            );
+                            supporting_text(
+                                ui,
+                                "Create or import cosigners, connect to a Kaspa node, and move multisig bundles from unsigned to final broadcast.",
+                            );
+                        });
+
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if let Some(texture) = &self.logo_texture {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new("igralabs.com")
+                                            .small()
+                                            .color(TEXT_SOFT),
+                                    );
+                                    ui.add(
+                                        egui::Image::new(texture)
+                                            .fit_to_exact_size(egui::vec2(144.0, 46.0)),
+                                    );
+                                });
+                                ui.add_space(12.0);
+                            }
+                            status_chip(
+                                ui,
+                                &daemon_state,
+                                state_color(
+                                    self.daemon_status
+                                        .as_ref()
+                                        .map(|state| state.state.as_str()),
+                                ),
+                            );
+                            status_chip(
+                                ui,
+                                status_text,
+                                if self.bridge.is_some() { TEAL } else { WARM_RED },
+                            );
+                        });
+                    });
+                }
             });
     }
 
@@ -942,110 +1001,396 @@ impl WalletApp {
         });
 
         side_card(ui, "Flow Rules", PANEL_ALT, |ui| {
-            ui.label("1. Bootstrap all cosigners with the same sorted kpub set.");
-            ui.label("2. Only the canonical owner (index 0) should create receive addresses.");
-            ui.label("3. Spending is always create unsigned -> sign -> sign -> broadcast.");
-            ui.label("4. The app manages the internal wallet engine and restarts it if the node RPC changes.");
-            ui.label("5. Large spends may produce multiple transactions; the backend already preserves that split/merge flow.");
+            wrapped_text(
+                ui,
+                "1. Bootstrap all cosigners with the same sorted kpub set.",
+                INK,
+            );
+            wrapped_text(
+                ui,
+                "2. Only the canonical owner (index 0) should create receive addresses.",
+                INK,
+            );
+            wrapped_text(
+                ui,
+                "3. Spending is always create unsigned -> sign -> sign -> broadcast.",
+                INK,
+            );
+            wrapped_text(
+                ui,
+                "4. The app manages the internal wallet engine and restarts it if the node RPC changes.",
+                INK,
+            );
+            wrapped_text(
+                ui,
+                "5. Large spends may produce multiple transactions; the backend already preserves that split/merge flow.",
+                INK,
+            );
         });
     }
 
-    fn render_bootstrap_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "1. Bootstrap", "Create or recover the local cosigner file, exchange kpubs, and pin the shared wallet fingerprint.", COPPER, |ui| {
-            ui.columns(2, |columns| {
-                columns[0].vertical(|ui| {
-                    let previous_network = self.bootstrap.network;
-                    ui.horizontal(|ui| {
-                        ui.label("Network");
-                        ComboBox::from_id_salt("bootstrap_network")
-                            .selected_text(self.bootstrap.network.display_name())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.bootstrap.network, NetworkChoice::Mainnet, "Mainnet");
-                                ui.selectable_value(&mut self.bootstrap.network, NetworkChoice::Testnet, "Testnet");
-                                ui.selectable_value(&mut self.bootstrap.network, NetworkChoice::Devnet, "Devnet");
-                                ui.selectable_value(&mut self.bootstrap.network, NetworkChoice::Simnet, "Simnet");
-                            });
-                        if self.bootstrap.network != previous_network {
-                            self.bootstrap.sync_defaults();
-                            self.node_form.sync_defaults(self.bootstrap.network);
-                        }
-                        if ui.button("Use guide defaults").clicked() {
-                            self.bootstrap.sync_defaults();
-                            self.node_form.sync_defaults(self.bootstrap.network);
-                        }
-                    });
-
-                    ui.add_space(8.0);
-                    field(ui, "Keys file", &mut self.bootstrap.keys_file);
-                    password_field(ui, "Wallet password", &mut self.bootstrap.password);
-
-                    ui.horizontal(|ui| {
-                        numeric_drag(ui, "Min signatures", &mut self.bootstrap.minimum_signatures, 1..=16);
-                        numeric_drag(ui, "Local keys", &mut self.bootstrap.num_private_keys, 1..=16);
-                        numeric_drag(ui, "Total cosigners", &mut self.bootstrap.num_public_keys, 1..=16);
-                    });
-                    ui.checkbox(&mut self.bootstrap.ecdsa, "Use ECDSA wallet");
-                    ui.checkbox(&mut self.bootstrap.overwrite, "Overwrite existing keys file");
-
-                    let expected_remote = self.bootstrap.num_public_keys.saturating_sub(self.bootstrap.num_private_keys);
-                    ui.add_space(10.0);
-                    ui.label(RichText::new(format!("Remote cosigner kpubs ({expected_remote} expected)")).strong());
-                    ui.add(
-                        TextEdit::multiline(&mut self.bootstrap.remote_public_keys)
-                            .desired_rows(6)
-                            .hint_text("Paste one kpub... per line."),
+    fn render_bootstrap_editor(&mut self, ui: &mut Ui) {
+        let previous_network = self.bootstrap.network;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Network");
+            ComboBox::from_id_salt("bootstrap_network")
+                .selected_text(self.bootstrap.network.display_name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.bootstrap.network,
+                        NetworkChoice::Mainnet,
+                        "Mainnet",
                     );
-
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.bootstrap.import_mode, "Recover from existing mnemonics");
-                        if self.bootstrap.import_mode {
-                            ui.label(RichText::new("One 24-word mnemonic per line").color(TEAL));
-                        }
-                    });
-                    if self.bootstrap.import_mode {
-                        ui.add(
-                            TextEdit::multiline(&mut self.bootstrap.import_mnemonics)
-                                .desired_rows(4)
-                                .hint_text("word1 word2 ... word24"),
-                        );
-                    }
-                });
-
-                columns[1].vertical(|ui| {
-                    ui.label(
-                        RichText::new("Bootstrap validation")
-                            .text_style(egui::TextStyle::Name("Section".into()))
-                            .color(INK),
+                    ui.selectable_value(
+                        &mut self.bootstrap.network,
+                        NetworkChoice::Testnet,
+                        "Testnet",
                     );
-                    ui.add_space(6.0);
-                    ui.label("The backend mirrors the Kaspa CLI flow:");
-                    ui.label("Create/import local mnemonic(s) -> derive local kpub(s) -> append remote kpubs -> sort for multisig fingerprint -> save wallet file.");
-                    ui.add_space(12.0);
-
-                    if let Some(summary) = &self.summary {
-                        metric_line(ui, "Fingerprint", summary.fingerprint.clone());
-                        metric_line(ui, "Cosigner index", summary.cosigner_index.to_string());
-                        metric_line(ui, "Canonical address owner", bool_word(summary.is_canonical_address_owner));
-                        metric_line(ui, "Path", summary.keys_file.clone());
-                    } else {
-                        ui.label("Load an existing keys file or create a new one to populate the wallet summary.");
-                    }
-
-                    ui.add_space(14.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Load wallet summary").clicked() {
-                            self.request_wallet_summary();
-                        }
-                        if ui.button("Create / recover wallet").clicked() {
-                            self.request_wallet_create();
-                        }
-                        if ui.button("Reveal mnemonics + missing kpubs").clicked() {
-                            self.request_export_secrets();
-                        }
-                    });
+                    ui.selectable_value(
+                        &mut self.bootstrap.network,
+                        NetworkChoice::Devnet,
+                        "Devnet",
+                    );
+                    ui.selectable_value(
+                        &mut self.bootstrap.network,
+                        NetworkChoice::Simnet,
+                        "Simnet",
+                    );
                 });
+            if self.bootstrap.network != previous_network {
+                self.bootstrap.sync_defaults();
+                self.node_form.sync_defaults(self.bootstrap.network);
+            }
+            if ui.button("Use guide defaults").clicked() {
+                self.bootstrap.sync_defaults();
+                self.node_form.sync_defaults(self.bootstrap.network);
+            }
+        });
+
+        ui.add_space(8.0);
+        field(ui, "Keys file", &mut self.bootstrap.keys_file);
+        password_field(ui, "Wallet password", &mut self.bootstrap.password);
+
+        ui.horizontal_wrapped(|ui| {
+            numeric_drag(
+                ui,
+                "Min signatures",
+                &mut self.bootstrap.minimum_signatures,
+                1..=16,
+            );
+            numeric_drag(
+                ui,
+                "Local keys",
+                &mut self.bootstrap.num_private_keys,
+                1..=16,
+            );
+            numeric_drag(
+                ui,
+                "Total cosigners",
+                &mut self.bootstrap.num_public_keys,
+                1..=16,
+            );
+        });
+        ui.checkbox(&mut self.bootstrap.ecdsa, "Use ECDSA wallet");
+        ui.checkbox(
+            &mut self.bootstrap.overwrite,
+            "Overwrite existing keys file",
+        );
+
+        let expected_remote = self
+            .bootstrap
+            .num_public_keys
+            .saturating_sub(self.bootstrap.num_private_keys);
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(format!(
+                "Remote cosigner kpubs ({expected_remote} expected)"
+            ))
+            .strong(),
+        );
+        ui.add(
+            TextEdit::multiline(&mut self.bootstrap.remote_public_keys)
+                .desired_rows(6)
+                .hint_text("Paste one kpub... per line."),
+        );
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.bootstrap.import_mode,
+                "Recover from existing mnemonics",
+            );
+            if self.bootstrap.import_mode {
+                ui.label(RichText::new("One 24-word mnemonic per line").color(TEAL));
+            }
+        });
+        if self.bootstrap.import_mode {
+            ui.add(
+                TextEdit::multiline(&mut self.bootstrap.import_mnemonics)
+                    .desired_rows(4)
+                    .hint_text("word1 word2 ... word24"),
+            );
+        }
+    }
+
+    fn render_bootstrap_summary_panel(&mut self, ui: &mut Ui) {
+        ui.label(
+            RichText::new("Bootstrap validation")
+                .text_style(egui::TextStyle::Name("Section".into()))
+                .color(INK),
+        );
+        ui.add_space(6.0);
+        supporting_text(ui, "The backend mirrors the Kaspa CLI multisig flow.");
+        supporting_text(
+            ui,
+            "Create or import local mnemonic(s), derive local kpub(s), append remote kpubs, sort them for the shared fingerprint, then save the wallet file.",
+        );
+        ui.add_space(12.0);
+
+        if let Some(summary) = &self.summary {
+            metric_line(ui, "Fingerprint", summary.fingerprint.clone());
+            metric_line(ui, "Cosigner index", summary.cosigner_index.to_string());
+            metric_line(
+                ui,
+                "Canonical address owner",
+                bool_word(summary.is_canonical_address_owner),
+            );
+            metric_line(ui, "Path", summary.keys_file.clone());
+        } else {
+            supporting_text(
+                ui,
+                "Load an existing keys file or create a new one to populate the wallet summary.",
+            );
+        }
+
+        ui.add_space(14.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Load wallet summary").clicked() {
+                self.request_wallet_summary();
+            }
+            if ui.button("Create or recover wallet").clicked() {
+                self.request_wallet_create();
+            }
+            if ui.button("Reveal recovery material").clicked() {
+                self.request_export_secrets();
+            }
+        });
+    }
+
+    fn render_receive_controls(&mut self, ui: &mut Ui) {
+        field(ui, "Kaspa node RPC", &mut self.node_form.rpc_server);
+        supporting_text(
+            ui,
+            "The wallet engine starts internally and restarts automatically when this endpoint changes.",
+        );
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Connect to node").clicked() {
+                self.request_connect_node();
+            }
+            if ui.button("Check sync status").clicked() {
+                self.request_daemon_status();
+            }
+            if ui.button("Refresh balance").clicked() {
+                self.request_balance();
+            }
+        });
+
+        ui.add_space(10.0);
+        let can_issue_receive = self
+            .summary
+            .as_ref()
+            .map(|summary| !summary.is_multisig || summary.is_canonical_address_owner)
+            .unwrap_or(true);
+        ui.add_enabled_ui(can_issue_receive, |ui| {
+            if ui.button("Create receive address").clicked() {
+                self.request_new_address();
+            }
+        });
+        if !can_issue_receive {
+            wrapped_text(
+                ui,
+                "This cosigner is not index 0. Use the canonical owner for receive addresses.",
+                WARM_RED,
+            );
+        }
+        if ui.button("Show known addresses").clicked() {
+            self.request_addresses();
+        }
+    }
+
+    fn render_receive_status_panel(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Live sync state").strong());
+        if let Some(status) = &self.daemon_status {
+            ui.label(
+                RichText::new(status.state.to_uppercase())
+                    .color(state_color(Some(status.state.as_str())))
+                    .strong(),
+            );
+            wrapped_text(ui, &status.message, INK);
+            if let Some(started_at) = &status.started_at {
+                metric_line(ui, "Started", started_at.clone());
+            }
+            if !status.rpc_server.is_empty() {
+                mono_value(ui, "Node RPC", &status.rpc_server);
+            }
+            if let Some(version) = &status.wallet_version {
+                mono_value(ui, "Wallet version", version);
+            }
+        } else {
+            supporting_text(ui, "Provide a node RPC to start syncing.");
+        }
+
+        ui.add_space(12.0);
+        if let Some(address) = &self.last_new_address {
+            mono_value(ui, "Latest receive address", address);
+        }
+        if !self.addresses.is_empty() {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Known receive addresses").strong());
+            for address in self.addresses.iter().take(6) {
+                mono_line(ui, address);
+            }
+        }
+    }
+
+    fn render_spend_controls(&mut self, ui: &mut Ui) {
+        field(ui, "Destination", &mut self.spend.to_address);
+        if ui.available_width() < 520.0 {
+            ui.vertical(|ui| {
+                ui.checkbox(&mut self.spend.send_all, "Send all");
+                if !self.spend.send_all {
+                    field(ui, "Amount (KAS)", &mut self.spend.amount_kas);
+                }
             });
+        } else {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.spend.send_all, "Send all");
+                if !self.spend.send_all {
+                    field(ui, "Amount (KAS)", &mut self.spend.amount_kas);
+                }
+            });
+        }
+        ui.checkbox(
+            &mut self.spend.use_existing_change_address,
+            "Prefer an existing change address",
+        );
+        ui.label(RichText::new("From addresses (optional)").strong());
+        supporting_text(
+            ui,
+            "Filter UTXOs by wallet address. Leave blank to spend from the full wallet set.",
+        );
+        ui.add(
+            TextEdit::multiline(&mut self.spend.from_addresses)
+                .desired_rows(3)
+                .hint_text("one address per line"),
+        );
+
+        ui.add_space(10.0);
+        if ui.available_width() < 520.0 {
+            ui.vertical(|ui| {
+                ui.label("Fee policy");
+                ComboBox::from_id_salt("fee_mode")
+                    .selected_text(self.spend.fee_mode.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.spend.fee_mode,
+                            FeeMode::Estimate,
+                            FeeMode::Estimate.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.spend.fee_mode,
+                            FeeMode::ExactFeeRate,
+                            FeeMode::ExactFeeRate.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.spend.fee_mode,
+                            FeeMode::MaxFeeRate,
+                            FeeMode::MaxFeeRate.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.spend.fee_mode,
+                            FeeMode::MaxFee,
+                            FeeMode::MaxFee.label(),
+                        );
+                    });
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.label("Fee policy");
+                ComboBox::from_id_salt("fee_mode")
+                    .selected_text(self.spend.fee_mode.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.spend.fee_mode,
+                            FeeMode::Estimate,
+                            FeeMode::Estimate.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.spend.fee_mode,
+                            FeeMode::ExactFeeRate,
+                            FeeMode::ExactFeeRate.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.spend.fee_mode,
+                            FeeMode::MaxFeeRate,
+                            FeeMode::MaxFeeRate.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.spend.fee_mode,
+                            FeeMode::MaxFee,
+                            FeeMode::MaxFee.label(),
+                        );
+                    });
+            });
+        }
+        if self.spend.fee_mode != FeeMode::Estimate {
+            field(ui, "Fee value", &mut self.spend.fee_value);
+        }
+
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Create unsigned").clicked() {
+                self.request_create_unsigned();
+            }
+            if ui.button("Add local signature").clicked() {
+                self.request_sign_flow();
+            }
+            if ui.button("Inspect bundle").clicked() {
+                self.request_parse_flow();
+            }
+            if ui.button("Broadcast bundle").clicked() {
+                self.request_broadcast_flow();
+            }
+        });
+    }
+
+    fn render_spend_status_panel(&mut self, ui: &mut Ui) {
+        let stage = flow_stage(self.flow_bundle.as_ref());
+        status_chip(ui, stage.0, stage.1);
+        if !self.last_broadcast_tx_ids.is_empty() {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Last broadcast txids").strong());
+            for txid in &self.last_broadcast_tx_ids {
+                mono_line(ui, txid);
+            }
+        }
+    }
+
+    fn render_bootstrap_section(&mut self, ui: &mut Ui) {
+        section_card(ui, "1. Bootstrap", "Create or recover the local cosigner file, exchange kpubs, and lock the shared wallet fingerprint.", COPPER, |ui| {
+            if ui.available_width() >= 980.0 {
+                ui.columns(2, |columns| {
+                    self.render_bootstrap_editor(&mut columns[0]);
+                    self.render_bootstrap_summary_panel(&mut columns[1]);
+                });
+            } else {
+                self.render_bootstrap_editor(ui);
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+                self.render_bootstrap_summary_panel(ui);
+            }
 
             if let Some(secrets) = &self.secrets {
                 ui.add_space(14.0);
@@ -1059,146 +1404,36 @@ impl WalletApp {
     }
 
     fn render_receive_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "2. Receive + Sync", "Provide a Kaspa node RPC and the app will manage the internal wallet engine, restart it on endpoint changes, and keep receive flow on the canonical cosigner.", TEAL, |ui| {
-            ui.columns(2, |columns| {
-                columns[0].vertical(|ui| {
-                    field(ui, "Kaspa node RPC", &mut self.node_form.rpc_server);
-                    ui.label(
-                        RichText::new(
-                            "The wallet engine is started internally and restarted automatically when this RPC endpoint changes.",
-                        )
-                        .color(TEXT_SOFT),
-                    );
-                    ui.add_space(8.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Connect wallet to node").clicked() {
-                            self.request_connect_node();
-                        }
-                        if ui.button("Refresh wallet state").clicked() {
-                            self.request_daemon_status();
-                        }
-                        if ui.button("Refresh balance").clicked() {
-                            self.request_balance();
-                        }
-                    });
-
-                    ui.add_space(10.0);
-                    let can_issue_receive = self
-                        .summary
-                        .as_ref()
-                        .map(|summary| !summary.is_multisig || summary.is_canonical_address_owner)
-                        .unwrap_or(true);
-                    ui.add_enabled_ui(can_issue_receive, |ui| {
-                        if ui.button("Create canonical receive address").clicked() {
-                            self.request_new_address();
-                        }
-                    });
-                    if !can_issue_receive {
-                        ui.label(RichText::new("This cosigner is not index 0. Use the canonical owner for receive addresses.").color(WARM_RED));
-                    }
-                    if ui.button("List known receive addresses").clicked() {
-                        self.request_addresses();
-                    }
+        section_card(ui, "2. Receive + Sync", "Provide a node RPC. The app manages the internal wallet engine and keeps receive flow on the canonical cosigner.", TEAL, |ui| {
+            if ui.available_width() >= 960.0 {
+                ui.columns(2, |columns| {
+                    self.render_receive_controls(&mut columns[0]);
+                    self.render_receive_status_panel(&mut columns[1]);
                 });
-
-                columns[1].vertical(|ui| {
-                    ui.label(RichText::new("Live sync state").strong());
-                    if let Some(status) = &self.daemon_status {
-                        ui.label(RichText::new(status.state.to_uppercase()).color(state_color(Some(status.state.as_str()))).strong());
-                        ui.label(status.message.clone());
-                        if let Some(started_at) = &status.started_at {
-                            metric_line(ui, "Started", started_at.clone());
-                        }
-                        if !status.rpc_server.is_empty() {
-                            mono_value(ui, "Node RPC", &status.rpc_server);
-                        }
-                        if let Some(version) = &status.wallet_version {
-                            mono_value(ui, "Wallet version", version);
-                        }
-                    } else {
-                        ui.label("Provide a node RPC to start syncing.");
-                    }
-
-                    ui.add_space(12.0);
-                    if let Some(address) = &self.last_new_address {
-                        mono_value(ui, "Latest receive address", address);
-                    }
-                    if !self.addresses.is_empty() {
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("Known receive addresses").strong());
-                        for address in self.addresses.iter().take(6) {
-                            mono_line(ui, address);
-                        }
-                    }
-                });
-            });
+            } else {
+                self.render_receive_controls(ui);
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+                self.render_receive_status_panel(ui);
+            }
         });
     }
 
     fn render_spend_section(&mut self, ui: &mut Ui) {
         section_card(ui, "3. Spend Pipeline", "The Go backend preserves the real multisig spend flow: create unsigned transactions, collect signatures offline, then broadcast once the bundle is fully signed.", OLIVE, |ui| {
-            ui.columns(2, |columns| {
-                columns[0].vertical(|ui| {
-                    field(ui, "Destination", &mut self.spend.to_address);
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.spend.send_all, "Send all");
-                        if !self.spend.send_all {
-                            field(ui, "Amount (KAS)", &mut self.spend.amount_kas);
-                        }
-                    });
-                    ui.checkbox(&mut self.spend.use_existing_change_address, "Prefer an existing change address");
-                    ui.label(RichText::new("From addresses (optional)").strong());
-                    ui.add(
-                        TextEdit::multiline(&mut self.spend.from_addresses)
-                            .desired_rows(3)
-                            .hint_text("Filter UTXOs by wallet address. One per line."),
-                    );
-
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Fee policy");
-                        ComboBox::from_id_salt("fee_mode")
-                            .selected_text(self.spend.fee_mode.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.spend.fee_mode, FeeMode::Estimate, FeeMode::Estimate.label());
-                                ui.selectable_value(&mut self.spend.fee_mode, FeeMode::ExactFeeRate, FeeMode::ExactFeeRate.label());
-                                ui.selectable_value(&mut self.spend.fee_mode, FeeMode::MaxFeeRate, FeeMode::MaxFeeRate.label());
-                                ui.selectable_value(&mut self.spend.fee_mode, FeeMode::MaxFee, FeeMode::MaxFee.label());
-                            });
-                    });
-                    if self.spend.fee_mode != FeeMode::Estimate {
-                        field(ui, "Fee value", &mut self.spend.fee_value);
-                    }
-
-                    ui.add_space(10.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Create unsigned").clicked() {
-                            self.request_create_unsigned();
-                        }
-                        if ui.button("Sign current hex").clicked() {
-                            self.request_sign_flow();
-                        }
-                        if ui.button("Parse current hex").clicked() {
-                            self.request_parse_flow();
-                        }
-                        if ui.button("Broadcast current hex").clicked() {
-                            self.request_broadcast_flow();
-                        }
-                    });
+            if ui.available_width() >= 1040.0 {
+                ui.columns(2, |columns| {
+                    self.render_spend_controls(&mut columns[0]);
+                    self.render_spend_status_panel(&mut columns[1]);
                 });
-
-                columns[1].vertical(|ui| {
-                    let stage = flow_stage(self.flow_bundle.as_ref());
-                    status_chip(ui, stage.0, stage.1);
-                    if !self.last_broadcast_tx_ids.is_empty() {
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("Last broadcast txids").strong());
-                        for txid in &self.last_broadcast_tx_ids {
-                            mono_line(ui, txid);
-                        }
-                    }
-                });
-            });
+            } else {
+                self.render_spend_controls(ui);
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+                self.render_spend_status_panel(ui);
+            }
 
             ui.add_space(12.0);
             ui.label(RichText::new("Transaction bundle hex").strong());
@@ -1241,7 +1476,7 @@ impl WalletApp {
                 if ui.button("Parse inspector hex").clicked() {
                     self.request_parse_inspector();
                 }
-                if ui.button("Pull current flow hex").clicked() {
+                if ui.button("Use current bundle").clicked() {
                     self.inspector.transactions_hex = self.flow_hex.clone();
                 }
                 if ui.button("Copy inspector hex").clicked() {
@@ -1333,7 +1568,7 @@ fn section_card<R>(
                 status_chip(ui, "multisig", accent);
             });
             ui.add_space(4.0);
-            ui.label(RichText::new(subtitle).color(TEXT_SOFT));
+            supporting_text(ui, subtitle);
             ui.add_space(14.0);
             add_contents(ui)
         })
@@ -1367,7 +1602,11 @@ fn secret_card(ui: &mut Ui, secrets: &ExportSecretsResponse, summary: &Option<Wa
         .stroke(Stroke::new(1.0, WARM_RED))
         .show(ui, |ui| {
             ui.label(RichText::new("Sensitive material on screen").strong().color(WARM_RED));
-            ui.label("Treat the following as temporary. Mnemonics should be written down offline, and only kpub strings are safe to share with cosigners.");
+            wrapped_text(
+                ui,
+                "Treat the following as temporary. Mnemonics should be written down offline, and only kpub strings are safe to share with cosigners.",
+                INK,
+            );
             ui.add_space(8.0);
 
             if !secrets.mnemonics.is_empty() {
@@ -1406,8 +1645,9 @@ fn secret_card(ui: &mut Ui, secrets: &ExportSecretsResponse, summary: &Option<Wa
 }
 
 fn render_transaction_bundle(ui: &mut Ui, bundle: &TransactionBundle) {
-    ui.label(
-        RichText::new(format!(
+    wrapped_text(
+        ui,
+        &format!(
             "{} transaction(s) in bundle{}",
             bundle.transaction_count,
             if bundle.fully_signed {
@@ -1415,8 +1655,8 @@ fn render_transaction_bundle(ui: &mut Ui, bundle: &TransactionBundle) {
             } else {
                 ""
             }
-        ))
-        .strong(),
+        ),
+        INK,
     );
     ui.add_space(8.0);
 
@@ -1466,10 +1706,14 @@ fn render_transaction_bundle(ui: &mut Ui, bundle: &TransactionBundle) {
                 ui.add_space(8.0);
                 ui.label(RichText::new("Signature progress").strong());
                 for progress in &transaction.signatures {
-                    ui.label(format!(
-                        "Input {}: {} of {} signatures collected",
-                        progress.input_index, progress.signed_by, progress.minimum_signatures
-                    ));
+                    wrapped_text(
+                        ui,
+                        &format!(
+                            "Input {}: {} of {} signatures collected",
+                            progress.input_index, progress.signed_by, progress.minimum_signatures
+                        ),
+                        INK,
+                    );
                 }
 
                 ui.add_space(8.0);
@@ -1493,28 +1737,24 @@ fn banner_line(ui: &mut Ui, banner: &BannerMessage) {
         .rounding(egui::Rounding::same(12.0))
         .stroke(Stroke::new(1.0, text))
         .show(ui, |ui| {
-            ui.label(RichText::new(&banner.text).color(text));
+            wrapped_text(ui, &banner.text, text);
         });
 }
 
 fn status_chip(ui: &mut Ui, label: impl AsRef<str>, color: Color32) {
     Frame::none()
         .fill(color.gamma_multiply(0.12))
-        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 5.0))
         .rounding(egui::Rounding::same(999.0))
         .stroke(Stroke::new(1.0, color))
         .show(ui, |ui| {
-            ui.label(RichText::new(label.as_ref()).color(color).strong());
+            ui.label(RichText::new(label.as_ref()).color(color).small().strong());
         });
 }
 
 fn metric_line(ui: &mut Ui, label: &str, value: String) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(label).color(TEXT_SOFT));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(value).strong().color(INK));
-        });
-    });
+    ui.label(RichText::new(label).color(TEXT_SOFT));
+    wrapped_text(ui, &value, INK);
 }
 
 fn mono_value(ui: &mut Ui, label: &str, value: &str) {
@@ -1523,7 +1763,17 @@ fn mono_value(ui: &mut Ui, label: &str, value: &str) {
 }
 
 fn mono_line(ui: &mut Ui, value: &str) {
-    ui.label(RichText::new(value).monospace().color(INK));
+    Frame::none()
+        .fill(PANEL_ALT)
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .rounding(egui::Rounding::same(10.0))
+        .stroke(Stroke::new(1.0, STROKE))
+        .show(ui, |ui| {
+            ui.add_sized(
+                [ui.available_width(), 0.0],
+                Label::new(RichText::new(value).monospace().color(INK)).wrap(),
+            );
+        });
 }
 
 fn field(ui: &mut Ui, label: &str, value: &mut String) {
@@ -1545,6 +1795,17 @@ fn numeric_drag(ui: &mut Ui, label: &str, value: &mut u32, range: std::ops::Rang
         ui.label(RichText::new(label).strong());
         ui.add(egui::DragValue::new(value).range(range));
     });
+}
+
+fn supporting_text(ui: &mut Ui, text: &str) {
+    wrapped_text(ui, text, TEXT_SOFT);
+}
+
+fn wrapped_text(ui: &mut Ui, text: &str, color: Color32) {
+    ui.add_sized(
+        [ui.available_width(), 0.0],
+        Label::new(RichText::new(text).color(color)).wrap(),
+    );
 }
 
 fn split_lines(input: &str) -> Vec<String> {

@@ -25,10 +25,12 @@ pub fn apply(ctx: &egui::Context) {
         ..Style::default()
     };
 
-    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+    style.spacing.item_spacing = egui::vec2(12.0, 12.0);
     style.spacing.window_margin = egui::Margin::same(18.0);
-    style.spacing.button_padding = egui::vec2(14.0, 10.0);
+    style.spacing.button_padding = egui::vec2(12.0, 9.0);
     style.spacing.menu_margin = egui::Margin::same(10.0);
+    style.spacing.text_edit_width = 320.0;
+    style.spacing.interact_size = egui::vec2(40.0, 28.0);
     style.visuals.window_fill = bg;
     style.visuals.panel_fill = bg;
     style.visuals.override_text_color = Some(text);
@@ -67,28 +69,28 @@ pub fn apply(ctx: &egui::Context) {
     style.text_styles = [
         (
             TextStyle::Heading,
-            FontId::new(26.0, FontFamily::Proportional),
+            FontId::new(24.0, FontFamily::Proportional),
         ),
         (
             TextStyle::Name("Hero".into()),
-            FontId::new(34.0, FontFamily::Proportional),
+            FontId::new(30.0, FontFamily::Proportional),
         ),
         (
             TextStyle::Name("Section".into()),
-            FontId::new(22.0, FontFamily::Proportional),
+            FontId::new(20.0, FontFamily::Proportional),
         ),
-        (TextStyle::Body, FontId::new(15.5, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(15.0, FontFamily::Proportional)),
         (
             TextStyle::Button,
-            FontId::new(15.0, FontFamily::Proportional),
+            FontId::new(14.5, FontFamily::Proportional),
         ),
         (
             TextStyle::Monospace,
-            FontId::new(14.0, FontFamily::Monospace),
+            FontId::new(13.0, FontFamily::Monospace),
         ),
         (
             TextStyle::Small,
-            FontId::new(12.5, FontFamily::Proportional),
+            FontId::new(12.0, FontFamily::Proportional),
         ),
     ]
     .into();
