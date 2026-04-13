@@ -98,11 +98,10 @@ pub struct ExportSecretsResponse {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DaemonStartRequest {
+pub struct SessionConfigRequest {
     pub network: String,
     pub keys_file: String,
     pub rpc_server: String,
-    pub listen: String,
     pub timeout_seconds: u32,
 }
 
@@ -357,12 +356,11 @@ impl BackendClient {
         self.post("/api/bootstrap/export-secrets", request)
     }
 
-    pub fn start_daemon(&self, request: &DaemonStartRequest) -> Result<DaemonStatus, String> {
-        self.post("/api/daemon/start", request)
-    }
-
-    pub fn stop_daemon(&self) -> Result<DaemonStatus, String> {
-        self.post("/api/daemon/stop", &EmptyBody {})
+    pub fn configure_session(
+        &self,
+        request: &SessionConfigRequest,
+    ) -> Result<DaemonStatus, String> {
+        self.post("/api/session/configure", request)
     }
 
     pub fn daemon_status(&self) -> Result<DaemonStatus, String> {

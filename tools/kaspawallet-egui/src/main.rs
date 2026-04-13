@@ -4,8 +4,8 @@ mod theme;
 use backend::{
     AddressesResponse, BackendClient, BackendProcess, BalanceResponse, BootstrapCreateRequest,
     BootstrapCreateResponse, BroadcastRequest, BroadcastResponse, CreateUnsignedRequest,
-    DaemonStartRequest, DaemonStatus, ExportSecretsRequest, ExportSecretsResponse,
-    FeePolicyRequest, NewAddressResponse, ParseRequest, SignRequest, TransactionBundle,
+    DaemonStatus, ExportSecretsRequest, ExportSecretsResponse, FeePolicyRequest,
+    NewAddressResponse, ParseRequest, SessionConfigRequest, SignRequest, TransactionBundle,
     WalletSummary, WalletSummaryRequest,
 };
 use eframe::egui::{self, Align, Color32, ComboBox, Frame, Layout, RichText, Stroke, TextEdit, Ui};
@@ -14,13 +14,17 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const INK: Color32 = Color32::from_rgb(45, 37, 33);
-const COPPER: Color32 = Color32::from_rgb(194, 102, 43);
-const TEAL: Color32 = Color32::from_rgb(0, 109, 118);
-const SAND: Color32 = Color32::from_rgb(248, 242, 233);
-const CREAM: Color32 = Color32::from_rgb(255, 252, 248);
-const WARM_RED: Color32 = Color32::from_rgb(176, 72, 61);
-const OLIVE: Color32 = Color32::from_rgb(95, 116, 62);
+const INK: Color32 = Color32::from_rgb(234, 255, 250);
+const TEXT_SOFT: Color32 = Color32::from_rgb(143, 191, 182);
+const COPPER: Color32 = Color32::from_rgb(58, 221, 190);
+const TEAL: Color32 = Color32::from_rgb(73, 234, 203);
+const SAND: Color32 = Color32::from_rgb(6, 22, 24);
+const CREAM: Color32 = Color32::from_rgb(10, 33, 36);
+const PANEL_ALT: Color32 = Color32::from_rgb(13, 44, 48);
+const PANEL_SOFT: Color32 = Color32::from_rgb(16, 56, 60);
+const STROKE: Color32 = Color32::from_rgb(31, 92, 90);
+const WARM_RED: Color32 = Color32::from_rgb(255, 122, 136);
+const OLIVE: Color32 = Color32::from_rgb(112, 199, 186);
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
@@ -36,9 +40,19 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
-            Ok(Box::new(WalletApp::new()))
+            Ok(Box::new(WalletApp::new(&cc.egui_ctx)))
         }),
     )
+}
+
+fn load_logo_texture(ctx: &egui::Context) -> Result<egui::TextureHandle, String> {
+    let bytes = include_bytes!("../assets/igralabs-logo.png");
+    let image = image::load_from_memory(bytes)
+        .map_err(|err| format!("failed to decode the IgraLabs logo: {err}"))?
+        .to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    Ok(ctx.load_texture("igralabs-logo", color_image, egui::TextureOptions::LINEAR))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -160,22 +174,19 @@ impl BootstrapForm {
     }
 }
 
-struct DaemonForm {
+struct NodeForm {
     rpc_server: String,
-    listen: String,
 }
 
-impl DaemonForm {
+impl NodeForm {
     fn new(network: NetworkChoice) -> Self {
         Self {
             rpc_server: network.default_rpc_server().to_owned(),
-            listen: String::new(),
         }
     }
 
     fn sync_defaults(&mut self, network: NetworkChoice) {
         self.rpc_server = network.default_rpc_server().to_owned();
-        self.listen.clear();
     }
 }
 
@@ -252,8 +263,9 @@ enum AppEvent {
 struct WalletApp {
     _backend: Option<BackendProcess>,
     bridge: Option<BackendClient>,
+    logo_texture: Option<egui::TextureHandle>,
     bootstrap: BootstrapForm,
-    daemon_form: DaemonForm,
+    node_form: NodeForm,
     spend: SpendForm,
     inspector: InspectorForm,
     summary: Option<WalletSummary>,
@@ -275,10 +287,11 @@ struct WalletApp {
 }
 
 impl WalletApp {
-    fn new() -> Self {
+    fn new(ctx: &egui::Context) -> Self {
         let (events_tx, events_rx) = mpsc::channel();
         let bootstrap = BootstrapForm::new();
-        let daemon_form = DaemonForm::new(bootstrap.network);
+        let node_form = NodeForm::new(bootstrap.network);
+        let logo_texture = load_logo_texture(ctx).ok();
 
         let (backend, bridge, banner) = match BackendProcess::spawn() {
             Ok(process) => {
@@ -288,7 +301,7 @@ impl WalletApp {
                     Some(bridge),
                     Some(BannerMessage {
                         tone: MessageTone::Info,
-                        text: "Local Go wallet bridge is running. Load or create a multisig wallet to begin.".to_owned(),
+                        text: "Local Go wallet bridge is running. Load or create a multisig wallet, then point it at a Kaspa node RPC.".to_owned(),
                     }),
                 )
             }
@@ -305,8 +318,9 @@ impl WalletApp {
         Self {
             _backend: backend,
             bridge,
+            logo_texture,
             bootstrap,
-            daemon_form,
+            node_form,
             spend: SpendForm::new(),
             inspector: InspectorForm::new(),
             summary: None,
@@ -398,22 +412,36 @@ impl WalletApp {
         });
     }
 
-    fn request_start_daemon(&mut self) {
-        let request = DaemonStartRequest {
+    fn current_session_request(&self) -> Result<SessionConfigRequest, String> {
+        let rpc_server = self.node_form.rpc_server.trim();
+        if rpc_server.is_empty() {
+            return Err("Kaspa node RPC is required for sync and spend operations.".to_owned());
+        }
+        Ok(SessionConfigRequest {
             network: self.network_string(),
             keys_file: self.bootstrap.keys_file.clone(),
-            rpc_server: self.daemon_form.rpc_server.clone(),
-            listen: self.daemon_form.listen.clone(),
+            rpc_server: rpc_server.to_owned(),
             timeout_seconds: 30,
-        };
-        self.spawn_task("start_daemon", move |bridge| {
-            AppEvent::DaemonStatus(bridge.start_daemon(&request))
-        });
+        })
     }
 
-    fn request_stop_daemon(&mut self) {
-        self.spawn_task("stop_daemon", move |bridge| {
-            AppEvent::DaemonStatus(bridge.stop_daemon())
+    fn maybe_connect_node(&mut self) {
+        if self.node_form.rpc_server.trim().is_empty() || self.pending.contains("session_config") {
+            return;
+        }
+        self.request_connect_node();
+    }
+
+    fn request_connect_node(&mut self) {
+        let request = match self.current_session_request() {
+            Ok(request) => request,
+            Err(err) => {
+                self.set_banner(MessageTone::Error, err);
+                return;
+            }
+        };
+        self.spawn_task("session_config", move |bridge| {
+            AppEvent::DaemonStatus(bridge.configure_session(&request))
         });
     }
 
@@ -424,17 +452,49 @@ impl WalletApp {
     }
 
     fn request_balance(&mut self) {
-        self.spawn_task("balance", move |bridge| AppEvent::Balance(bridge.balance()));
+        let session = match self.current_session_request() {
+            Ok(request) => request,
+            Err(err) => {
+                self.set_banner(MessageTone::Error, err);
+                return;
+            }
+        };
+        self.spawn_task("balance", move |bridge| {
+            if let Err(err) = bridge.configure_session(&session) {
+                return AppEvent::Balance(Err(err));
+            }
+            AppEvent::Balance(bridge.balance())
+        });
     }
 
     fn request_addresses(&mut self) {
+        let session = match self.current_session_request() {
+            Ok(request) => request,
+            Err(err) => {
+                self.set_banner(MessageTone::Error, err);
+                return;
+            }
+        };
         self.spawn_task("addresses", move |bridge| {
+            if let Err(err) = bridge.configure_session(&session) {
+                return AppEvent::Addresses(Err(err));
+            }
             AppEvent::Addresses(bridge.list_addresses())
         });
     }
 
     fn request_new_address(&mut self) {
+        let session = match self.current_session_request() {
+            Ok(request) => request,
+            Err(err) => {
+                self.set_banner(MessageTone::Error, err);
+                return;
+            }
+        };
         self.spawn_task("new_address", move |bridge| {
+            if let Err(err) = bridge.configure_session(&session) {
+                return AppEvent::NewAddress(Err(err));
+            }
             AppEvent::NewAddress(bridge.new_address())
         });
     }
@@ -442,6 +502,13 @@ impl WalletApp {
     fn request_create_unsigned(&mut self) {
         let fee_policy = match self.spend.fee_policy() {
             Ok(policy) => policy,
+            Err(err) => {
+                self.set_banner(MessageTone::Error, err);
+                return;
+            }
+        };
+        let session = match self.current_session_request() {
+            Ok(request) => request,
             Err(err) => {
                 self.set_banner(MessageTone::Error, err);
                 return;
@@ -457,6 +524,9 @@ impl WalletApp {
             fee_policy,
         };
         self.spawn_task("flow_bundle", move |bridge| {
+            if let Err(err) = bridge.configure_session(&session) {
+                return AppEvent::FlowBundle(Err(err));
+            }
             AppEvent::FlowBundle(bridge.create_unsigned(&request))
         });
     }
@@ -485,10 +555,20 @@ impl WalletApp {
     }
 
     fn request_broadcast_flow(&mut self) {
+        let session = match self.current_session_request() {
+            Ok(request) => request,
+            Err(err) => {
+                self.set_banner(MessageTone::Error, err);
+                return;
+            }
+        };
         let request = BroadcastRequest {
             transactions_hex: self.flow_hex.clone(),
         };
         self.spawn_task("broadcast", move |bridge| {
+            if let Err(err) = bridge.configure_session(&session) {
+                return AppEvent::Broadcasted(Err(err));
+            }
             AppEvent::Broadcasted(bridge.broadcast(&request))
         });
     }
@@ -511,11 +591,13 @@ impl WalletApp {
                     self.pending.remove("summary");
                     match result {
                         Ok(summary) => {
+                            self.bootstrap.keys_file = summary.keys_file.clone();
                             self.summary = Some(summary);
                             self.set_banner(
                                 MessageTone::Info,
                                 "Loaded wallet summary from the Go backend.",
                             );
+                            self.maybe_connect_node();
                         }
                         Err(err) => self.set_banner(MessageTone::Error, err),
                     }
@@ -537,6 +619,7 @@ impl WalletApp {
                                 created.canonical_owner_warning.as_str()
                             };
                             self.set_banner(MessageTone::Info, message);
+                            self.maybe_connect_node();
                         }
                         Err(err) => self.set_banner(MessageTone::Error, err),
                     }
@@ -555,8 +638,7 @@ impl WalletApp {
                     }
                 }
                 AppEvent::DaemonStatus(result) => {
-                    self.pending.remove("start_daemon");
-                    self.pending.remove("stop_daemon");
+                    self.pending.remove("session_config");
                     self.pending.remove("daemon_status");
                     match result {
                         Ok(status) => {
@@ -577,6 +659,9 @@ impl WalletApp {
                     match result {
                         Ok(balance) => {
                             self.balance = Some(balance);
+                            if !self.pending.contains("daemon_status") {
+                                self.request_daemon_status();
+                            }
                         }
                         Err(err) => self.set_banner(MessageTone::Error, err),
                     }
@@ -586,6 +671,9 @@ impl WalletApp {
                     match result {
                         Ok(addresses) => {
                             self.addresses = addresses.addresses;
+                            if !self.pending.contains("daemon_status") {
+                                self.request_daemon_status();
+                            }
                         }
                         Err(err) => self.set_banner(MessageTone::Error, err),
                     }
@@ -602,6 +690,9 @@ impl WalletApp {
                                 MessageTone::Info,
                                 "Generated the next canonical receive address.",
                             );
+                            if !self.pending.contains("daemon_status") {
+                                self.request_daemon_status();
+                            }
                         }
                         Err(err) => self.set_banner(MessageTone::Error, err),
                     }
@@ -616,6 +707,9 @@ impl WalletApp {
                                 MessageTone::Info,
                                 "Updated the spend pipeline state using the Go wallet backend.",
                             );
+                            if !self.pending.contains("daemon_status") {
+                                self.request_daemon_status();
+                            }
                         }
                         Err(err) => self.set_banner(MessageTone::Error, err),
                     }
@@ -696,12 +790,12 @@ impl WalletApp {
             .unwrap_or_else(|| "STOPPED".to_owned());
 
         Frame::none()
-            .fill(Color32::from_rgb(238, 229, 217))
+            .fill(PANEL_ALT)
             .inner_margin(egui::Margin::same(18.0))
             .rounding(egui::Rounding::same(18.0))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(216, 196, 173)))
+            .stroke(Stroke::new(1.0, STROKE))
             .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new("Kaspa Multisig Control Room")
@@ -711,13 +805,23 @@ impl WalletApp {
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(
-                                "Bootstrap with shared kpub exchange, sync through the local wallet daemon, then move transactions through unsigned -> partial -> fully signed -> broadcast.",
+                                "Bootstrap with shared kpub exchange, point the wallet at a Kaspa node RPC, and let the app manage the internal wallet engine through unsigned -> partial -> fully signed -> broadcast.",
                             )
-                            .color(Color32::from_rgb(86, 73, 63)),
+                            .color(TEXT_SOFT),
                         );
                     });
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(texture) = &self.logo_texture {
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("igralabs.com").small().color(TEXT_SOFT));
+                                ui.add(
+                                    egui::Image::new(texture)
+                                        .fit_to_exact_size(egui::vec2(157.0, 50.0)),
+                                );
+                            });
+                            ui.add_space(14.0);
+                        }
                         status_chip(ui, &daemon_state, state_color(self.daemon_status.as_ref().map(|state| state.state.as_str())));
                         status_chip(ui, status_text, if self.bridge.is_some() { TEAL } else { WARM_RED });
                     });
@@ -726,7 +830,7 @@ impl WalletApp {
     }
 
     fn render_sidebar(&mut self, ui: &mut Ui) {
-        side_card(ui, "Wallet Shape", Color32::from_rgb(251, 247, 241), |ui| {
+        side_card(ui, "Wallet Shape", CREAM, |ui| {
             metric_line(
                 ui,
                 "Signer threshold",
@@ -795,7 +899,7 @@ impl WalletApp {
             );
         });
 
-        side_card(ui, "Daemon", Color32::from_rgb(244, 249, 249), |ui| {
+        side_card(ui, "Wallet Engine", PANEL_ALT, |ui| {
             let state = self
                 .daemon_status
                 .as_ref()
@@ -805,7 +909,10 @@ impl WalletApp {
                 .daemon_status
                 .as_ref()
                 .map(|status| status.message.clone())
-                .unwrap_or_else(|| "No daemon process yet.".to_owned());
+                .unwrap_or_else(|| {
+                    "The app will start the internal wallet engine when a node RPC is configured."
+                        .to_owned()
+                });
             ui.label(
                 RichText::new(state.to_uppercase())
                     .strong()
@@ -814,9 +921,9 @@ impl WalletApp {
             ui.add_space(6.0);
             ui.label(message);
             if let Some(status) = &self.daemon_status {
-                if !status.daemon_address.is_empty() {
+                if !status.rpc_server.is_empty() {
                     ui.add_space(8.0);
-                    mono_value(ui, "Daemon address", &status.daemon_address);
+                    mono_value(ui, "Node RPC", &status.rpc_server);
                 }
                 if let Some(version) = &status.wallet_version {
                     mono_value(ui, "Wallet version", version);
@@ -824,21 +931,22 @@ impl WalletApp {
             }
         });
 
-        side_card(ui, "Balance", Color32::from_rgb(248, 245, 236), |ui| {
+        side_card(ui, "Balance", CREAM, |ui| {
             if let Some(balance) = &self.balance {
                 metric_line(ui, "Available", format!("{} KAS", balance.available_kas));
                 metric_line(ui, "Pending", format!("{} KAS", balance.pending_kas));
                 metric_line(ui, "Live addresses", balance.addresses.len().to_string());
             } else {
-                ui.label("Start and sync the daemon to load wallet balances.");
+                ui.label("Connect the wallet to a node RPC to load live balances.");
             }
         });
 
-        side_card(ui, "Flow Rules", Color32::from_rgb(251, 245, 242), |ui| {
+        side_card(ui, "Flow Rules", PANEL_ALT, |ui| {
             ui.label("1. Bootstrap all cosigners with the same sorted kpub set.");
             ui.label("2. Only the canonical owner (index 0) should create receive addresses.");
             ui.label("3. Spending is always create unsigned -> sign -> sign -> broadcast.");
-            ui.label("4. Large spends may produce multiple transactions; the backend already preserves that split/merge flow.");
+            ui.label("4. The app manages the internal wallet engine and restarts it if the node RPC changes.");
+            ui.label("5. Large spends may produce multiple transactions; the backend already preserves that split/merge flow.");
         });
     }
 
@@ -859,11 +967,11 @@ impl WalletApp {
                             });
                         if self.bootstrap.network != previous_network {
                             self.bootstrap.sync_defaults();
-                            self.daemon_form.sync_defaults(self.bootstrap.network);
+                            self.node_form.sync_defaults(self.bootstrap.network);
                         }
                         if ui.button("Use guide defaults").clicked() {
                             self.bootstrap.sync_defaults();
-                            self.daemon_form.sync_defaults(self.bootstrap.network);
+                            self.node_form.sync_defaults(self.bootstrap.network);
                         }
                     });
 
@@ -951,20 +1059,22 @@ impl WalletApp {
     }
 
     fn render_receive_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "2. Receive + Sync", "Run the Go wallet daemon locally, let it discover multisig branches, and only issue receive addresses from the canonical cosigner.", TEAL, |ui| {
+        section_card(ui, "2. Receive + Sync", "Provide a Kaspa node RPC and the app will manage the internal wallet engine, restart it on endpoint changes, and keep receive flow on the canonical cosigner.", TEAL, |ui| {
             ui.columns(2, |columns| {
                 columns[0].vertical(|ui| {
-                    field(ui, "RPC server", &mut self.daemon_form.rpc_server);
-                    field(ui, "Daemon listen (optional)", &mut self.daemon_form.listen);
+                    field(ui, "Kaspa node RPC", &mut self.node_form.rpc_server);
+                    ui.label(
+                        RichText::new(
+                            "The wallet engine is started internally and restarted automatically when this RPC endpoint changes.",
+                        )
+                        .color(TEXT_SOFT),
+                    );
                     ui.add_space(8.0);
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Start local daemon").clicked() {
-                            self.request_start_daemon();
+                        if ui.button("Connect wallet to node").clicked() {
+                            self.request_connect_node();
                         }
-                        if ui.button("Stop daemon").clicked() {
-                            self.request_stop_daemon();
-                        }
-                        if ui.button("Refresh status").clicked() {
+                        if ui.button("Refresh wallet state").clicked() {
                             self.request_daemon_status();
                         }
                         if ui.button("Refresh balance").clicked() {
@@ -999,11 +1109,14 @@ impl WalletApp {
                         if let Some(started_at) = &status.started_at {
                             metric_line(ui, "Started", started_at.clone());
                         }
-                        if !status.daemon_address.is_empty() {
-                            mono_value(ui, "Daemon", &status.daemon_address);
+                        if !status.rpc_server.is_empty() {
+                            mono_value(ui, "Node RPC", &status.rpc_server);
+                        }
+                        if let Some(version) = &status.wallet_version {
+                            mono_value(ui, "Wallet version", version);
                         }
                     } else {
-                        ui.label("No daemon status yet.");
+                        ui.label("Provide a node RPC to start syncing.");
                     }
 
                     ui.add_space(12.0);
@@ -1117,7 +1230,7 @@ impl WalletApp {
     }
 
     fn render_inspector_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "4. Inspector", "Review any transaction bundle offline. This is useful for audit logs, signature collection, and final broadcast checks.", WARM_RED, |ui| {
+        section_card(ui, "4. Inspector", "Review any transaction bundle offline. This is useful for audit logs, signature collection, and final broadcast checks.", OLIVE, |ui| {
             ui.add(
                 TextEdit::multiline(&mut self.inspector.transactions_hex)
                     .desired_rows(8)
@@ -1169,7 +1282,7 @@ impl eframe::App for WalletApp {
             .default_width(290.0)
             .frame(
                 Frame::none()
-                    .fill(Color32::from_rgb(242, 236, 228))
+                    .fill(SAND)
                     .inner_margin(egui::Margin::same(16.0)),
             )
             .show(ctx, |ui| {
@@ -1181,7 +1294,7 @@ impl eframe::App for WalletApp {
         egui::CentralPanel::default()
             .frame(
                 Frame::none()
-                    .fill(CREAM)
+                    .fill(SAND)
                     .inner_margin(egui::Margin::same(16.0)),
             )
             .show(ctx, |ui| {
@@ -1206,10 +1319,10 @@ fn section_card<R>(
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> R {
     Frame::none()
-        .fill(Color32::from_rgb(255, 252, 248))
+        .fill(CREAM)
         .inner_margin(egui::Margin::same(18.0))
         .rounding(egui::Rounding::same(18.0))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(215, 200, 186)))
+        .stroke(Stroke::new(1.0, STROKE))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
@@ -1220,7 +1333,7 @@ fn section_card<R>(
                 status_chip(ui, "multisig", accent);
             });
             ui.add_space(4.0);
-            ui.label(RichText::new(subtitle).color(Color32::from_rgb(92, 80, 72)));
+            ui.label(RichText::new(subtitle).color(TEXT_SOFT));
             ui.add_space(14.0);
             add_contents(ui)
         })
@@ -1237,7 +1350,7 @@ fn side_card<R>(
         .fill(fill)
         .inner_margin(egui::Margin::same(14.0))
         .rounding(egui::Rounding::same(16.0))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(215, 200, 186)))
+        .stroke(Stroke::new(1.0, STROKE))
         .show(ui, |ui| {
             ui.label(RichText::new(title).strong().color(INK));
             ui.add_space(8.0);
@@ -1248,10 +1361,10 @@ fn side_card<R>(
 
 fn secret_card(ui: &mut Ui, secrets: &ExportSecretsResponse, summary: &Option<WalletSummary>) {
     Frame::none()
-        .fill(Color32::from_rgb(255, 245, 236))
+        .fill(Color32::from_rgb(42, 19, 26))
         .inner_margin(egui::Margin::same(14.0))
         .rounding(egui::Rounding::same(14.0))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(224, 176, 131)))
+        .stroke(Stroke::new(1.0, WARM_RED))
         .show(ui, |ui| {
             ui.label(RichText::new("Sensitive material on screen").strong().color(WARM_RED));
             ui.label("Treat the following as temporary. Mnemonics should be written down offline, and only kpub strings are safe to share with cosigners.");
@@ -1309,10 +1422,10 @@ fn render_transaction_bundle(ui: &mut Ui, bundle: &TransactionBundle) {
 
     for transaction in &bundle.transactions {
         Frame::none()
-            .fill(Color32::from_rgb(250, 247, 243))
+            .fill(PANEL_SOFT)
             .inner_margin(egui::Margin::same(12.0))
             .rounding(egui::Rounding::same(14.0))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(220, 206, 191)))
+            .stroke(Stroke::new(1.0, STROKE))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(format!("Transaction #{}", transaction.index)).strong());
@@ -1371,8 +1484,8 @@ fn render_transaction_bundle(ui: &mut Ui, bundle: &TransactionBundle) {
 
 fn banner_line(ui: &mut Ui, banner: &BannerMessage) {
     let (fill, text) = match banner.tone {
-        MessageTone::Info => (Color32::from_rgb(236, 247, 245), TEAL),
-        MessageTone::Error => (Color32::from_rgb(254, 240, 238), WARM_RED),
+        MessageTone::Info => (PANEL_SOFT, TEAL),
+        MessageTone::Error => (Color32::from_rgb(49, 18, 27), WARM_RED),
     };
     Frame::none()
         .fill(fill)
@@ -1397,7 +1510,7 @@ fn status_chip(ui: &mut Ui, label: impl AsRef<str>, color: Color32) {
 
 fn metric_line(ui: &mut Ui, label: &str, value: String) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(label).color(Color32::from_rgb(110, 97, 86)));
+        ui.label(RichText::new(label).color(TEXT_SOFT));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(RichText::new(value).strong().color(INK));
         });
@@ -1405,7 +1518,7 @@ fn metric_line(ui: &mut Ui, label: &str, value: String) {
 }
 
 fn mono_value(ui: &mut Ui, label: &str, value: &str) {
-    ui.label(RichText::new(label).color(Color32::from_rgb(111, 97, 86)));
+    ui.label(RichText::new(label).color(TEXT_SOFT));
     mono_line(ui, value);
 }
 
@@ -1468,6 +1581,7 @@ fn bool_word(value: bool) -> String {
 fn state_color(state: Option<&str>) -> Color32 {
     match state.unwrap_or("stopped") {
         "ready" => OLIVE,
+        "configured" => TEAL,
         "syncing" | "running" | "starting" => COPPER,
         _ => WARM_RED,
     }
@@ -1475,7 +1589,7 @@ fn state_color(state: Option<&str>) -> Color32 {
 
 fn flow_stage(bundle: Option<&TransactionBundle>) -> (&'static str, Color32) {
     match bundle {
-        None => ("awaiting bundle", Color32::from_rgb(118, 110, 102)),
+        None => ("awaiting bundle", TEXT_SOFT),
         Some(bundle) if bundle.fully_signed => ("ready to broadcast", OLIVE),
         Some(bundle)
             if bundle

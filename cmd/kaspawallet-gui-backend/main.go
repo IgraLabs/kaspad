@@ -38,8 +38,9 @@ const (
 )
 
 type backendApp struct {
-	mu     sync.RWMutex
-	daemon *daemonHandle
+	mu      sync.RWMutex
+	daemon  *daemonHandle
+	session *daemonSessionConfig
 }
 
 type daemonHandle struct {
@@ -51,6 +52,13 @@ type daemonHandle struct {
 
 	FinishedAt *time.Time
 	ExitError  string
+}
+
+type daemonSessionConfig struct {
+	Network        string
+	KeysFile       string
+	RPCServer      string
+	TimeoutSeconds uint32
 }
 
 type apiError struct {
@@ -113,6 +121,13 @@ type exportSecretsResponse struct {
 	Mnemonics          []string `json:"mnemonics"`
 	ExternalPublicKeys []string `json:"externalPublicKeys"`
 	MinimumSignatures  uint32   `json:"minimumSignatures"`
+}
+
+type sessionConfigureRequest struct {
+	Network        string `json:"network"`
+	KeysFile       string `json:"keysFile"`
+	RPCServer      string `json:"rpcServer"`
+	TimeoutSeconds uint32 `json:"timeoutSeconds"`
 }
 
 type daemonStartRequest struct {
@@ -246,6 +261,7 @@ func main() {
 	mux.HandleFunc("/api/wallet/summary", wrap(app.handleWalletSummary))
 	mux.HandleFunc("/api/bootstrap/create", wrap(app.handleBootstrapCreate))
 	mux.HandleFunc("/api/bootstrap/export-secrets", wrap(app.handleExportSecrets))
+	mux.HandleFunc("/api/session/configure", wrap(app.handleSessionConfigure))
 	mux.HandleFunc("/api/daemon/start", wrap(app.handleDaemonStart))
 	mux.HandleFunc("/api/daemon/stop", wrap(app.handleDaemonStop))
 	mux.HandleFunc("/api/daemon/status", wrap(app.handleDaemonStatus))
@@ -480,106 +496,39 @@ func (b *backendApp) handleExportSecrets(_ context.Context, request exportSecret
 	}, nil
 }
 
-func (b *backendApp) handleDaemonStart(ctx context.Context, request daemonStartRequest) (any, error) {
-	request.KeysFile = expandUserPath(request.KeysFile)
-	params, err := paramsForNetwork(request.Network)
+func (b *backendApp) handleSessionConfigure(ctx context.Context, request sessionConfigureRequest) (any, error) {
+	config, err := normalizeSessionConfig(request.Network, request.KeysFile, request.RPCServer, request.TimeoutSeconds)
 	if err != nil {
 		return nil, err
 	}
-	if request.KeysFile == "" {
-		return nil, fmt.Errorf("keys file is required")
-	}
-	if request.RPCServer == "" {
-		request.RPCServer = defaultDaemonRPCServer
-	}
-	if request.TimeoutSeconds == 0 {
-		request.TimeoutSeconds = defaultDaemonTimeout
-	}
-	if request.Listen == "" {
-		request.Listen, err = findFreeLoopbackAddress()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	b.mu.Lock()
-	if b.daemon != nil && b.daemon.FinishedAt == nil {
-		b.mu.Unlock()
-		return nil, fmt.Errorf("daemon already running on %s", b.daemon.Address)
-	}
-
-	handle := &daemonHandle{
-		Network:   params.Name,
-		KeysFile:  request.KeysFile,
-		RPCServer: request.RPCServer,
-		Address:   request.Listen,
-		StartedAt: time.Now(),
-	}
-	b.daemon = handle
-	b.mu.Unlock()
-
-	go func(expected *daemonHandle) {
-		runErr := walletserver.Start(params, expected.Address, expected.RPCServer, expected.KeysFile, "", request.TimeoutSeconds)
-		finishedAt := time.Now()
-
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		if b.daemon != expected {
-			return
-		}
-		expected.FinishedAt = &finishedAt
-		if runErr != nil {
-			expected.ExitError = runErr.Error()
-		}
-	}(handle)
-
-	if err := waitForDaemonReady(ctx, request.Listen, 5*time.Second); err != nil {
+	if _, err := b.ensureDaemon(ctx, config, ""); err != nil {
 		return nil, err
 	}
+	return b.currentDaemonStatus(ctx)
+}
 
-	return b.handleDaemonStatus(ctx, struct{}{})
+func (b *backendApp) handleDaemonStart(ctx context.Context, request daemonStartRequest) (any, error) {
+	config, err := normalizeSessionConfig(request.Network, request.KeysFile, request.RPCServer, request.TimeoutSeconds)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := b.ensureDaemon(ctx, config, request.Listen); err != nil {
+		return nil, err
+	}
+	return b.currentDaemonStatus(ctx)
 }
 
 func (b *backendApp) handleDaemonStop(ctx context.Context, _ struct{}) (any, error) {
-	b.mu.RLock()
-	handle := b.daemon
-	b.mu.RUnlock()
-
+	handle, err := b.stopDaemonInternal(ctx, true)
+	if err != nil {
+		return nil, err
+	}
 	if handle == nil {
-		return daemonStatusResponse{State: "stopped", Message: "daemon is not running"}, nil
+		return daemonStatusResponse{State: "stopped", Message: "wallet engine is disconnected"}, nil
 	}
-
-	clientConn, tearDown, err := client.Connect(handle.Address)
-	if err == nil {
-		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_, shutdownErr := clientConn.Shutdown(shutdownCtx, &pb.ShutdownRequest{})
-		cancel()
-		tearDown()
-		if shutdownErr != nil {
-			return nil, shutdownErr
-		}
-	}
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		b.mu.RLock()
-		finished := handle.FinishedAt != nil
-		b.mu.RUnlock()
-		if finished || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	b.mu.Lock()
-	if b.daemon == handle {
-		b.daemon = nil
-	}
-	b.mu.Unlock()
-
 	return daemonStatusResponse{
 		State:         "stopped",
-		Message:       "daemon stopped",
+		Message:       "wallet engine stopped",
 		DaemonAddress: handle.Address,
 		Network:       handle.Network,
 		KeysFile:      handle.KeysFile,
@@ -592,7 +541,7 @@ func (b *backendApp) handleDaemonStatus(ctx context.Context, _ struct{}) (any, e
 }
 
 func (b *backendApp) handleBalance(ctx context.Context, _ struct{}) (any, error) {
-	daemonInfo, walletClient, tearDown, err := b.connectCurrentDaemon()
+	daemonInfo, walletClient, tearDown, err := b.connectCurrentDaemon(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -631,7 +580,7 @@ func (b *backendApp) handleBalance(ctx context.Context, _ struct{}) (any, error)
 }
 
 func (b *backendApp) handleListAddresses(ctx context.Context, _ struct{}) (any, error) {
-	_, walletClient, tearDown, err := b.connectCurrentDaemon()
+	_, walletClient, tearDown, err := b.connectCurrentDaemon(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -648,7 +597,7 @@ func (b *backendApp) handleListAddresses(ctx context.Context, _ struct{}) (any, 
 }
 
 func (b *backendApp) handleNewAddress(ctx context.Context, _ struct{}) (any, error) {
-	_, walletClient, tearDown, err := b.connectCurrentDaemon()
+	_, walletClient, tearDown, err := b.connectCurrentDaemon(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -665,7 +614,7 @@ func (b *backendApp) handleNewAddress(ctx context.Context, _ struct{}) (any, err
 }
 
 func (b *backendApp) handleCreateUnsigned(ctx context.Context, request createUnsignedRequest) (any, error) {
-	daemonInfo, walletClient, tearDown, err := b.connectCurrentDaemon()
+	daemonInfo, walletClient, tearDown, err := b.connectCurrentDaemon(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -734,7 +683,7 @@ func (b *backendApp) handleSign(_ context.Context, request signRequest) (any, er
 }
 
 func (b *backendApp) handleBroadcast(ctx context.Context, request broadcastRequest) (any, error) {
-	_, walletClient, tearDown, err := b.connectCurrentDaemon()
+	_, walletClient, tearDown, err := b.connectCurrentDaemon(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -769,19 +718,255 @@ func (b *backendApp) handleParse(_ context.Context, request parseRequest) (any, 
 	return bundleResponseFromTransactionsHex(request.Network, keysFile, request.TransactionsHex)
 }
 
-func (b *backendApp) connectCurrentDaemon() (*daemonHandle, pb.KaspawalletdClient, func(), error) {
+func normalizeSessionConfig(network, keysFilePath, rpcServer string, timeout uint32) (daemonSessionConfig, error) {
+	keysFilePath = expandUserPath(keysFilePath)
+	params, err := paramsForNetwork(network)
+	if err != nil {
+		return daemonSessionConfig{}, err
+	}
+	if keysFilePath == "" {
+		return daemonSessionConfig{}, fmt.Errorf("keys file is required")
+	}
+	if rpcServer == "" {
+		rpcServer = defaultDaemonRPCServer
+	}
+	if timeout == 0 {
+		timeout = defaultDaemonTimeout
+	}
+	if _, err := keys.ReadKeysFile(params, keysFilePath); err != nil {
+		return daemonSessionConfig{}, err
+	}
+	return daemonSessionConfig{
+		Network:        params.Name,
+		KeysFile:       keysFilePath,
+		RPCServer:      rpcServer,
+		TimeoutSeconds: timeout,
+	}, nil
+}
+
+func daemonMatchesConfig(handle *daemonHandle, config daemonSessionConfig) bool {
+	return handle.Network == config.Network &&
+		handle.KeysFile == config.KeysFile &&
+		handle.RPCServer == config.RPCServer
+}
+
+func (b *backendApp) currentSessionConfig() (daemonSessionConfig, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.session == nil {
+		return daemonSessionConfig{}, fmt.Errorf("configure a wallet RPC session first")
+	}
+	return *b.session, nil
+}
+
+func (b *backendApp) ensureDaemon(ctx context.Context, config daemonSessionConfig, preferredListen string) (*daemonHandle, error) {
+	for {
+		b.mu.Lock()
+		configCopy := config
+		b.session = &configCopy
+
+		if b.daemon == nil {
+			listen := preferredListen
+			if listen == "" {
+				var err error
+				listen, err = findFreeLoopbackAddress()
+				if err != nil {
+					b.mu.Unlock()
+					return nil, err
+				}
+			}
+
+			handle := &daemonHandle{
+				Network:   config.Network,
+				KeysFile:  config.KeysFile,
+				RPCServer: config.RPCServer,
+				Address:   listen,
+				StartedAt: time.Now(),
+			}
+			b.daemon = handle
+			b.mu.Unlock()
+
+			go b.runDaemon(handle, config)
+
+			if err := b.waitForReadyOrExit(ctx, handle); err != nil {
+				return nil, err
+			}
+			return handle, nil
+		}
+
+		handle := b.daemon
+		matches := daemonMatchesConfig(handle, config)
+		finished := handle.FinishedAt != nil
+		b.mu.Unlock()
+
+		if matches && !finished {
+			if err := b.waitForReadyOrExit(ctx, handle); err != nil {
+				return nil, err
+			}
+			return handle, nil
+		}
+
+		if matches && finished {
+			b.mu.Lock()
+			if b.daemon == handle {
+				b.daemon = nil
+			}
+			b.mu.Unlock()
+			continue
+		}
+
+		if _, err := b.stopDaemonInternal(ctx, false); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (b *backendApp) runDaemon(expected *daemonHandle, config daemonSessionConfig) {
+	params, err := paramsForNetwork(config.Network)
+	if err != nil {
+		finishedAt := time.Now()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.daemon != expected {
+			return
+		}
+		expected.FinishedAt = &finishedAt
+		expected.ExitError = err.Error()
+		return
+	}
+
+	runErr := walletserver.Start(
+		params,
+		expected.Address,
+		expected.RPCServer,
+		expected.KeysFile,
+		"",
+		config.TimeoutSeconds,
+	)
+	finishedAt := time.Now()
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.daemon != expected {
+		return
+	}
+	expected.FinishedAt = &finishedAt
+	if runErr != nil {
+		expected.ExitError = runErr.Error()
+	}
+}
+
+func (b *backendApp) waitForReadyOrExit(ctx context.Context, handle *daemonHandle) error {
+	if err := waitForDaemonReady(ctx, handle.Address, 5*time.Second); err == nil {
+		return nil
+	} else if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if handle.ExitError != "" {
+		return errors.New(handle.ExitError)
+	}
+	if handle.FinishedAt != nil {
+		return fmt.Errorf("wallet engine exited before becoming ready")
+	}
+	return fmt.Errorf("timed out waiting for wallet engine on %s", handle.Address)
+}
+
+func (b *backendApp) stopDaemonInternal(ctx context.Context, clearSession bool) (*daemonHandle, error) {
 	b.mu.RLock()
 	handle := b.daemon
 	b.mu.RUnlock()
+
 	if handle == nil {
-		return nil, nil, nil, fmt.Errorf("daemon is not running")
-	}
-	if handle.FinishedAt != nil {
-		message := "daemon is not running"
-		if handle.ExitError != "" {
-			message = handle.ExitError
+		if clearSession {
+			b.mu.Lock()
+			b.session = nil
+			b.mu.Unlock()
 		}
-		return nil, nil, nil, errors.New(message)
+		return nil, nil
+	}
+
+	b.mu.RLock()
+	finished := handle.FinishedAt != nil
+	b.mu.RUnlock()
+	if !finished {
+		if err := requestDaemonShutdown(ctx, handle); err != nil {
+			return nil, err
+		}
+		if err := waitForDaemonExit(ctx, b, handle, 5*time.Second); err != nil {
+			return nil, err
+		}
+	}
+
+	b.mu.Lock()
+	if b.daemon == handle {
+		b.daemon = nil
+	}
+	if clearSession {
+		b.session = nil
+	}
+	b.mu.Unlock()
+	return handle, nil
+}
+
+func requestDaemonShutdown(ctx context.Context, handle *daemonHandle) error {
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for {
+		clientConn, tearDown, err := client.Connect(handle.Address)
+		if err == nil {
+			shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_, shutdownErr := clientConn.Shutdown(shutdownCtx, &pb.ShutdownRequest{})
+			cancel()
+			tearDown()
+			return shutdownErr
+		}
+
+		lastErr = err
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+}
+
+func waitForDaemonExit(ctx context.Context, backend *backendApp, handle *daemonHandle, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		backend.mu.RLock()
+		finished := handle.FinishedAt != nil
+		backend.mu.RUnlock()
+		if finished {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for wallet engine to stop")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (b *backendApp) connectCurrentDaemon(ctx context.Context) (*daemonHandle, pb.KaspawalletdClient, func(), error) {
+	config, err := b.currentSessionConfig()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	handle, err := b.ensureDaemon(ctx, config, "")
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	walletClient, tearDown, err := client.Connect(handle.Address)
@@ -793,16 +978,44 @@ func (b *backendApp) connectCurrentDaemon() (*daemonHandle, pb.KaspawalletdClien
 
 func (b *backendApp) currentDaemonStatus(ctx context.Context) (daemonStatusResponse, error) {
 	b.mu.RLock()
-	handle := b.daemon
+	var handle *daemonHandle
+	if b.daemon != nil {
+		handleCopy := *b.daemon
+		if b.daemon.FinishedAt != nil {
+			finishedAtCopy := *b.daemon.FinishedAt
+			handleCopy.FinishedAt = &finishedAtCopy
+		}
+		handle = &handleCopy
+	}
+	var session *daemonSessionConfig
+	if b.session != nil {
+		copy := *b.session
+		session = &copy
+	}
 	b.mu.RUnlock()
 
 	if handle == nil {
-		return daemonStatusResponse{State: "stopped", Message: "daemon is not running"}, nil
+		if session == nil {
+			return daemonStatusResponse{State: "stopped", Message: "wallet engine is idle until a node RPC is provided"}, nil
+		}
+
+		response := daemonStatusResponse{
+			State:     "configured",
+			Message:   "node RPC saved; the internal wallet engine will start on demand",
+			Network:   session.Network,
+			KeysFile:  session.KeysFile,
+			RPCServer: session.RPCServer,
+		}
+		if keysFile, err := loadWalletKeys(session.Network, session.KeysFile); err == nil {
+			wallet := walletSummaryFromKeysFile(session.Network, keysFile)
+			response.Wallet = &wallet
+		}
+		return response, nil
 	}
 
 	response := daemonStatusResponse{
 		State:         "starting",
-		Message:       "starting local wallet daemon",
+		Message:       "starting internal wallet engine",
 		DaemonAddress: handle.Address,
 		Network:       handle.Network,
 		KeysFile:      handle.KeysFile,
@@ -826,7 +1039,7 @@ func (b *backendApp) currentDaemonStatus(ctx context.Context) (daemonStatusRespo
 	}
 	if handle.FinishedAt != nil {
 		response.State = "stopped"
-		response.Message = "daemon exited"
+		response.Message = "wallet engine exited"
 		return response, nil
 	}
 
