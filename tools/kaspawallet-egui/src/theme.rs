@@ -11,15 +11,6 @@ pub fn apply(ctx: &egui::Context) {
     let text = Color32::from_rgb(234, 255, 250);
     let muted = Color32::from_rgb(143, 191, 182);
 
-    let mut fonts = egui::FontDefinitions::default();
-    if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
-        family.insert(0, "Ubuntu-Light".to_owned());
-    }
-    if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
-        family.insert(0, "Hack".to_owned());
-    }
-    ctx.set_fonts(fonts);
-
     let mut style = Style {
         visuals: Visuals::dark(),
         ..Style::default()
@@ -73,24 +64,24 @@ pub fn apply(ctx: &egui::Context) {
         ),
         (
             TextStyle::Name("Hero".into()),
-            FontId::new(30.0, FontFamily::Proportional),
+            FontId::new(28.0, FontFamily::Proportional),
         ),
         (
             TextStyle::Name("Section".into()),
-            FontId::new(20.0, FontFamily::Proportional),
+            FontId::new(19.0, FontFamily::Proportional),
         ),
-        (TextStyle::Body, FontId::new(15.0, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(15.5, FontFamily::Proportional)),
         (
             TextStyle::Button,
-            FontId::new(14.5, FontFamily::Proportional),
+            FontId::new(15.0, FontFamily::Proportional),
         ),
         (
             TextStyle::Monospace,
-            FontId::new(13.0, FontFamily::Monospace),
+            FontId::new(13.5, FontFamily::Monospace),
         ),
         (
             TextStyle::Small,
-            FontId::new(12.0, FontFamily::Proportional),
+            FontId::new(12.5, FontFamily::Proportional),
         ),
     ]
     .into();

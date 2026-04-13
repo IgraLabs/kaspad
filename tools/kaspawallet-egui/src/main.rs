@@ -8,9 +8,7 @@ use backend::{
     NewAddressResponse, ParseRequest, SessionConfigRequest, SignRequest, TransactionBundle,
     WalletSummary, WalletSummaryRequest,
 };
-use eframe::egui::{
-    self, Align, Color32, ComboBox, Frame, Label, Layout, RichText, Stroke, TextEdit, Ui,
-};
+use eframe::egui::{self, Color32, ComboBox, Frame, Label, RichText, Stroke, TextEdit, Ui};
 use std::collections::BTreeSet;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -121,12 +119,42 @@ enum MessageTone {
     Error,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupMode {
+    OpenExisting,
+    CreateNew,
+    RecoverExisting,
+}
+
+impl SetupMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OpenExisting => "Open wallet",
+            Self::CreateNew => "Create wallet",
+            Self::RecoverExisting => "Recover wallet",
+        }
+    }
+
+    fn helper(self) -> &'static str {
+        match self {
+            Self::OpenExisting => "Load an existing multisig wallet file and inspect its role.",
+            Self::CreateNew => {
+                "Create a new multisig cosigner file and collect remote public keys."
+            }
+            Self::RecoverExisting => {
+                "Recover this cosigner from mnemonic phrases and rebuild the wallet file."
+            }
+        }
+    }
+}
+
 struct BannerMessage {
     tone: MessageTone,
     text: String,
 }
 
 struct BootstrapForm {
+    setup_mode: SetupMode,
     network: NetworkChoice,
     keys_file: String,
     password: String,
@@ -144,6 +172,7 @@ impl BootstrapForm {
     fn new() -> Self {
         let network = NetworkChoice::Mainnet;
         Self {
+            setup_mode: SetupMode::CreateNew,
             network,
             keys_file: network.default_keys_file(),
             password: String::new(),
@@ -303,7 +332,7 @@ impl WalletApp {
                     Some(bridge),
                     Some(BannerMessage {
                         tone: MessageTone::Info,
-                        text: "Local Go wallet bridge is running. Load or create a multisig wallet, then point it at a Kaspa node RPC.".to_owned(),
+                        text: "The local wallet backend is running. Start by opening, creating, or recovering a multisig wallet.".to_owned(),
                     }),
                 )
             }
@@ -348,6 +377,111 @@ impl WalletApp {
         self.bootstrap.network.as_str().to_owned()
     }
 
+    fn wallet_loaded(&self) -> bool {
+        self.summary.is_some()
+    }
+
+    fn engine_state(&self) -> &str {
+        self.daemon_status
+            .as_ref()
+            .map(|status| status.state.as_str())
+            .unwrap_or("stopped")
+    }
+
+    fn wallet_ready(&self) -> bool {
+        self.engine_state() == "ready"
+    }
+
+    fn receive_role_label(&self) -> &'static str {
+        if self
+            .summary
+            .as_ref()
+            .map(|summary| !summary.is_multisig || summary.is_canonical_address_owner)
+            .unwrap_or(false)
+        {
+            "Can create receive addresses"
+        } else {
+            "Signing-only cosigner"
+        }
+    }
+
+    fn next_action(&self) -> &'static str {
+        if !self.wallet_loaded() {
+            return "Create, recover, or open a multisig wallet.";
+        }
+        if self.node_form.rpc_server.trim().is_empty() {
+            return "Add a Kaspa node RPC to sync this wallet.";
+        }
+        if !matches!(
+            self.engine_state(),
+            "configured" | "starting" | "syncing" | "running" | "ready"
+        ) {
+            return "Connect the wallet to your node.";
+        }
+        if !self.wallet_ready() {
+            return "Wait for the wallet engine to finish syncing.";
+        }
+        if self.addresses.is_empty() && self.last_new_address.is_none() {
+            return "Generate the next receive address or start a spend.";
+        }
+        "Wallet is ready for receive and spend flows."
+    }
+
+    fn expected_remote_key_count(&self) -> u32 {
+        self.bootstrap
+            .num_public_keys
+            .saturating_sub(self.bootstrap.num_private_keys)
+    }
+
+    fn provided_remote_key_count(&self) -> usize {
+        self.bootstrap.remote_public_keys_vec().len()
+    }
+
+    fn setup_primary_action_label(&self) -> &'static str {
+        match self.bootstrap.setup_mode {
+            SetupMode::OpenExisting => "Open wallet",
+            SetupMode::CreateNew => "Create wallet",
+            SetupMode::RecoverExisting => "Recover wallet",
+        }
+    }
+
+    fn setup_can_submit(&self) -> bool {
+        if self.bootstrap.keys_file.trim().is_empty() {
+            return false;
+        }
+
+        match self.bootstrap.setup_mode {
+            SetupMode::OpenExisting => true,
+            SetupMode::CreateNew | SetupMode::RecoverExisting => {
+                if self.bootstrap.password.trim().is_empty() {
+                    return false;
+                }
+                if self.bootstrap.num_private_keys == 0
+                    || self.bootstrap.num_public_keys == 0
+                    || self.bootstrap.minimum_signatures == 0
+                {
+                    return false;
+                }
+                if self.bootstrap.num_private_keys > self.bootstrap.num_public_keys {
+                    return false;
+                }
+                if self.bootstrap.minimum_signatures > self.bootstrap.num_public_keys {
+                    return false;
+                }
+                if self.provided_remote_key_count() != self.expected_remote_key_count() as usize {
+                    return false;
+                }
+                if matches!(self.bootstrap.setup_mode, SetupMode::RecoverExisting)
+                    && self.bootstrap.import_mnemonics_vec().len()
+                        != self.bootstrap.num_private_keys as usize
+                {
+                    return false;
+                }
+                true
+            }
+        }
+    }
+
     fn spawn_task<F>(&mut self, tag: &'static str, task: F)
     where
         F: FnOnce(BackendClient) -> AppEvent + Send + 'static,
@@ -390,7 +524,7 @@ impl WalletApp {
             num_private_keys: self.bootstrap.num_private_keys,
             num_public_keys: self.bootstrap.num_public_keys,
             remote_public_keys: self.bootstrap.remote_public_keys_vec(),
-            import_mnemonics: if self.bootstrap.import_mode {
+            import_mnemonics: if matches!(self.bootstrap.setup_mode, SetupMode::RecoverExisting) {
                 self.bootstrap.import_mnemonics_vec()
             } else {
                 Vec::new()
@@ -595,10 +729,7 @@ impl WalletApp {
                         Ok(summary) => {
                             self.bootstrap.keys_file = summary.keys_file.clone();
                             self.summary = Some(summary);
-                            self.set_banner(
-                                MessageTone::Info,
-                                "Loaded wallet summary from the Go backend.",
-                            );
+                            self.set_banner(MessageTone::Info, "Wallet loaded.");
                             self.maybe_connect_node();
                         }
                         Err(err) => self.set_banner(MessageTone::Error, err),
@@ -616,7 +747,7 @@ impl WalletApp {
                             });
                             self.bootstrap.keys_file = created.summary.keys_file.clone();
                             let message = if created.canonical_owner_warning.is_empty() {
-                                "Wallet file created and fingerprint locked in."
+                                "Wallet file created and fingerprint confirmed."
                             } else {
                                 created.canonical_owner_warning.as_str()
                             };
@@ -633,7 +764,7 @@ impl WalletApp {
                             self.secrets = Some(secrets);
                             self.set_banner(
                                 MessageTone::Info,
-                                "Decrypted wallet secrets are on screen. Clear them when finished.",
+                                "Sensitive recovery material is visible below. Clear it when finished.",
                             );
                         }
                         Err(err) => self.set_banner(MessageTone::Error, err),
@@ -690,7 +821,7 @@ impl WalletApp {
                             }
                             self.set_banner(
                                 MessageTone::Info,
-                                "Generated the next canonical receive address.",
+                                "Generated the next receive address.",
                             );
                             if !self.pending.contains("daemon_status") {
                                 self.request_daemon_status();
@@ -705,10 +836,7 @@ impl WalletApp {
                         Ok(bundle) => {
                             self.flow_hex = bundle.transactions_hex.clone();
                             self.flow_bundle = Some(bundle);
-                            self.set_banner(
-                                MessageTone::Info,
-                                "Updated the spend pipeline state using the Go wallet backend.",
-                            );
+                            self.set_banner(MessageTone::Info, "Spend bundle updated.");
                             if !self.pending.contains("daemon_status") {
                                 self.request_daemon_status();
                             }
@@ -797,66 +925,82 @@ impl WalletApp {
             .rounding(egui::Rounding::same(18.0))
             .stroke(Stroke::new(1.0, STROKE))
             .show(ui, |ui| {
-                let compact = ui.available_width() < 1120.0;
-
-                if compact {
-                    ui.vertical(|ui| {
-                        render_header_title(ui);
-                        supporting_text(ui, "Create or import cosigners, connect to a Kaspa node, and move multisig bundles from unsigned to final broadcast.");
-                        ui.add_space(10.0);
-                        render_brand_lockup(ui, self.logo_texture.as_ref(), true);
-                        ui.add_space(8.0);
-                        ui.horizontal_wrapped(|ui| {
-                            status_chip(
-                                ui,
-                                status_text,
-                                if self.bridge.is_some() { TEAL } else { WARM_RED },
-                            );
-                            status_chip(
-                                ui,
-                                &daemon_state,
-                                state_color(
-                                    self.daemon_status
-                                        .as_ref()
-                                        .map(|state| state.state.as_str()),
-                                ),
-                            );
-                        });
-                    });
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            render_header_title(ui);
-                            supporting_text(ui, "Create or import cosigners, connect to a Kaspa node, and move multisig bundles from unsigned to final broadcast.");
-                        });
-
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            render_brand_lockup(ui, self.logo_texture.as_ref(), false);
-                        });
-                    });
-                    ui.add_space(10.0);
-                    ui.horizontal_wrapped(|ui| {
-                        status_chip(
-                            ui,
-                            status_text,
-                            if self.bridge.is_some() { TEAL } else { WARM_RED },
-                        );
-                        status_chip(
-                            ui,
-                            &daemon_state,
-                            state_color(
-                                self.daemon_status
-                                    .as_ref()
-                                    .map(|state| state.state.as_str()),
-                            ),
-                        );
-                    });
-                }
+                ui.label(
+                    RichText::new("Kaspa Multisig Wallet")
+                        .text_style(egui::TextStyle::Name("Hero".into()))
+                        .color(INK),
+                );
+                supporting_text(
+                    ui,
+                    "Set up a multisig wallet, connect to a Kaspa node, receive funds, collect signatures, and broadcast when the bundle is ready.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    status_chip(
+                        ui,
+                        status_text,
+                        if self.bridge.is_some() { TEAL } else { WARM_RED },
+                    );
+                    status_chip(
+                        ui,
+                        &daemon_state,
+                        state_color(
+                            self.daemon_status
+                                .as_ref()
+                                .map(|state| state.state.as_str()),
+                        ),
+                    );
+                    status_chip(ui, self.receive_role_label(), COPPER);
+                });
+                ui.add_space(10.0);
+                highlight_strip(ui, "Next step", self.next_action(), COPPER);
             });
     }
 
     fn render_sidebar(&mut self, ui: &mut Ui) {
-        side_card(ui, "Wallet Shape", CREAM, |ui| {
+        render_sidebar_brand(ui, self.logo_texture.as_ref());
+
+        side_card(ui, "Journey", CREAM, |ui| {
+            journey_step_card(
+                ui,
+                "1. Wallet setup",
+                "Create, recover, or open a multisig wallet file.",
+                self.wallet_loaded(),
+                !self.wallet_loaded(),
+            );
+            journey_step_card(
+                ui,
+                "2. Node connection",
+                "Connect the wallet to a Kaspa node and let the app manage sync.",
+                matches!(
+                    self.engine_state(),
+                    "configured" | "starting" | "syncing" | "running" | "ready"
+                ),
+                self.wallet_loaded() && !self.wallet_ready(),
+            );
+            journey_step_card(
+                ui,
+                "3. Receive funds",
+                "Generate receive addresses from the primary cosigner and monitor wallet balances.",
+                self.wallet_ready()
+                    && (!self.addresses.is_empty() || self.last_new_address.is_some()),
+                self.wallet_ready() && self.flow_bundle.is_none(),
+            );
+            journey_step_card(
+                ui,
+                "4. Send funds",
+                "Create an unsigned bundle, add signatures, then broadcast.",
+                !self.last_broadcast_tx_ids.is_empty(),
+                self.wallet_ready() && self.last_broadcast_tx_ids.is_empty(),
+            );
+        });
+
+        side_card(ui, "Wallet Snapshot", PANEL_ALT, |ui| {
+            metric_line(
+                ui,
+                "Network",
+                self.bootstrap.network.display_name().to_owned(),
+            );
             metric_line(
                 ui,
                 "Signer threshold",
@@ -923,9 +1067,10 @@ impl WalletApp {
                     "no".to_owned()
                 },
             );
+            metric_line(ui, "Receive role", self.receive_role_label().to_owned());
         });
 
-        side_card(ui, "Wallet Engine", PANEL_ALT, |ui| {
+        side_card(ui, "Live Wallet", CREAM, |ui| {
             let state = self
                 .daemon_status
                 .as_ref()
@@ -945,7 +1090,7 @@ impl WalletApp {
                     .color(state_color(Some(state.as_str()))),
             );
             ui.add_space(6.0);
-            ui.label(message);
+            wrapped_text(ui, &message, INK);
             if let Some(status) = &self.daemon_status {
                 if !status.rpc_server.is_empty() {
                     ui.add_space(8.0);
@@ -955,49 +1100,140 @@ impl WalletApp {
                     mono_value(ui, "Wallet version", version);
                 }
             }
-        });
-
-        side_card(ui, "Balance", CREAM, |ui| {
             if let Some(balance) = &self.balance {
+                ui.add_space(10.0);
                 metric_line(ui, "Available", format!("{} KAS", balance.available_kas));
                 metric_line(ui, "Pending", format!("{} KAS", balance.pending_kas));
                 metric_line(ui, "Live addresses", balance.addresses.len().to_string());
             } else {
-                ui.label("Connect the wallet to a node RPC to load live balances.");
+                supporting_text(
+                    ui,
+                    "Connect the wallet to a node RPC to load live balances.",
+                );
             }
         });
 
-        side_card(ui, "Flow Rules", PANEL_ALT, |ui| {
+        side_card(ui, "Multisig Notes", PANEL_ALT, |ui| {
             wrapped_text(
                 ui,
-                "1. Bootstrap all cosigners with the same sorted kpub set.",
+                "All cosigners must use the same sorted set of public keys to share one fingerprint.",
                 INK,
             );
             wrapped_text(
                 ui,
-                "2. Only the canonical owner (index 0) should create receive addresses.",
+                "Only the primary cosigner should create receive addresses for the wallet.",
                 INK,
             );
             wrapped_text(
                 ui,
-                "3. Spending is always create unsigned -> sign -> sign -> broadcast.",
+                "Spending always follows the same path: create unsigned bundle, add signatures, then broadcast.",
                 INK,
             );
             wrapped_text(
                 ui,
-                "4. The app manages the internal wallet engine and restarts it if the node RPC changes.",
-                INK,
-            );
-            wrapped_text(
-                ui,
-                "5. Large spends may produce multiple transactions; the backend already preserves that split/merge flow.",
+                "The app restarts the internal wallet engine when the node RPC changes, and large spends can create multi-transaction bundles.",
                 INK,
             );
         });
     }
 
+    fn render_overview_section(&mut self, ui: &mut Ui) {
+        section_card(
+            ui,
+            "Overview",
+            "This screen tracks the current wallet, node connection, receive role, and next action.",
+            TEAL,
+            |ui| {
+                if ui.available_width() >= 980.0 {
+                    ui.columns(2, |columns| {
+                        columns[0].vertical(|ui| {
+                            metric_line(
+                                ui,
+                                "Wallet",
+                                if self.wallet_loaded() {
+                                    "Loaded".to_owned()
+                                } else {
+                                    "Not loaded yet".to_owned()
+                                },
+                            );
+                            metric_line(
+                                ui,
+                                "Engine state",
+                                self.engine_state().to_uppercase(),
+                            );
+                            metric_line(
+                                ui,
+                                "Receive role",
+                                self.receive_role_label().to_owned(),
+                            );
+                            if let Some(summary) = &self.summary {
+                                metric_line(ui, "Fingerprint", summary.fingerprint.clone());
+                            }
+                        });
+                        columns[1].vertical(|ui| {
+                            highlight_strip(ui, "What to do now", self.next_action(), TEAL);
+                            if let Some(balance) = &self.balance {
+                                ui.add_space(10.0);
+                                metric_line(
+                                    ui,
+                                    "Available balance",
+                                    format!("{} KAS", balance.available_kas),
+                                );
+                                metric_line(
+                                    ui,
+                                    "Pending balance",
+                                    format!("{} KAS", balance.pending_kas),
+                                );
+                            }
+                        });
+                    });
+                } else {
+                    metric_line(
+                        ui,
+                        "Wallet",
+                        if self.wallet_loaded() {
+                            "Loaded".to_owned()
+                        } else {
+                            "Not loaded yet".to_owned()
+                        },
+                    );
+                    metric_line(ui, "Engine state", self.engine_state().to_uppercase());
+                    metric_line(ui, "Receive role", self.receive_role_label().to_owned());
+                    if let Some(summary) = &self.summary {
+                        metric_line(ui, "Fingerprint", summary.fingerprint.clone());
+                    }
+                    ui.add_space(10.0);
+                    highlight_strip(ui, "What to do now", self.next_action(), TEAL);
+                }
+            },
+        );
+    }
+
     fn render_bootstrap_editor(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Choose how you want to start").strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut self.bootstrap.setup_mode,
+                SetupMode::OpenExisting,
+                SetupMode::OpenExisting.label(),
+            );
+            ui.selectable_value(
+                &mut self.bootstrap.setup_mode,
+                SetupMode::CreateNew,
+                SetupMode::CreateNew.label(),
+            );
+            ui.selectable_value(
+                &mut self.bootstrap.setup_mode,
+                SetupMode::RecoverExisting,
+                SetupMode::RecoverExisting.label(),
+            );
+        });
+        supporting_text(ui, self.bootstrap.setup_mode.helper());
+        self.bootstrap.import_mode =
+            matches!(self.bootstrap.setup_mode, SetupMode::RecoverExisting);
+
         let previous_network = self.bootstrap.network;
+        ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
             ui.label("Network");
             ComboBox::from_id_salt("bootstrap_network")
@@ -1028,74 +1264,95 @@ impl WalletApp {
                 self.bootstrap.sync_defaults();
                 self.node_form.sync_defaults(self.bootstrap.network);
             }
-            if ui.button("Use guide defaults").clicked() {
+            if ui.button("Use defaults").clicked() {
                 self.bootstrap.sync_defaults();
                 self.node_form.sync_defaults(self.bootstrap.network);
             }
         });
 
         ui.add_space(8.0);
-        field(ui, "Keys file", &mut self.bootstrap.keys_file);
-        password_field(ui, "Wallet password", &mut self.bootstrap.password);
+        field(ui, "Wallet file", &mut self.bootstrap.keys_file);
 
-        ui.horizontal_wrapped(|ui| {
-            numeric_drag(
-                ui,
-                "Min signatures",
-                &mut self.bootstrap.minimum_signatures,
-                1..=16,
-            );
-            numeric_drag(
-                ui,
-                "Local keys",
-                &mut self.bootstrap.num_private_keys,
-                1..=16,
-            );
-            numeric_drag(
-                ui,
-                "Total cosigners",
-                &mut self.bootstrap.num_public_keys,
-                1..=16,
-            );
-        });
-        ui.checkbox(&mut self.bootstrap.ecdsa, "Use ECDSA wallet");
-        ui.checkbox(
-            &mut self.bootstrap.overwrite,
-            "Overwrite existing keys file",
-        );
+        if matches!(
+            self.bootstrap.setup_mode,
+            SetupMode::CreateNew | SetupMode::RecoverExisting
+        ) {
+            password_field(ui, "Wallet password", &mut self.bootstrap.password);
 
-        let expected_remote = self
-            .bootstrap
-            .num_public_keys
-            .saturating_sub(self.bootstrap.num_private_keys);
-        ui.add_space(10.0);
-        ui.label(
-            RichText::new(format!(
-                "Remote cosigner kpubs ({expected_remote} expected)"
-            ))
-            .strong(),
-        );
-        ui.add(
-            TextEdit::multiline(&mut self.bootstrap.remote_public_keys)
-                .desired_rows(6)
-                .hint_text("Paste one kpub... per line."),
-        );
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                numeric_drag(
+                    ui,
+                    "Required signatures",
+                    &mut self.bootstrap.minimum_signatures,
+                    1..=16,
+                );
+                numeric_drag(
+                    ui,
+                    "Local keys",
+                    &mut self.bootstrap.num_private_keys,
+                    1..=16,
+                );
+                numeric_drag(
+                    ui,
+                    "Total cosigners",
+                    &mut self.bootstrap.num_public_keys,
+                    1..=16,
+                );
+            });
+            ui.checkbox(&mut self.bootstrap.ecdsa, "Use ECDSA wallet");
             ui.checkbox(
-                &mut self.bootstrap.import_mode,
-                "Recover from existing mnemonics",
+                &mut self.bootstrap.overwrite,
+                "Replace an existing wallet file",
             );
-            if self.bootstrap.import_mode {
-                ui.label(RichText::new("One 24-word mnemonic per line").color(TEAL));
-            }
-        });
-        if self.bootstrap.import_mode {
+
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "Remote cosigner public keys ({} expected)",
+                        self.expected_remote_key_count()
+                    ))
+                    .strong(),
+                );
+                let remote_complete =
+                    self.provided_remote_key_count() == self.expected_remote_key_count() as usize;
+                status_chip(
+                    ui,
+                    format!(
+                        "{} of {} provided",
+                        self.provided_remote_key_count(),
+                        self.expected_remote_key_count()
+                    ),
+                    if remote_complete { OLIVE } else { WARM_RED },
+                );
+            });
+            supporting_text(
+                ui,
+                "Paste one remote extended public key per line. The app validates the expected cosigner count before creating the wallet.",
+            );
             ui.add(
-                TextEdit::multiline(&mut self.bootstrap.import_mnemonics)
-                    .desired_rows(4)
-                    .hint_text("word1 word2 ... word24"),
+                TextEdit::multiline(&mut self.bootstrap.remote_public_keys)
+                    .desired_rows(6)
+                    .hint_text("kpub... one per line"),
+            );
+
+            if matches!(self.bootstrap.setup_mode, SetupMode::RecoverExisting) {
+                ui.add_space(8.0);
+                ui.label(RichText::new("Recovery phrases").strong());
+                supporting_text(
+                    ui,
+                    "Enter one mnemonic phrase per local key. The count must match the number of local keys.",
+                );
+                ui.add(
+                    TextEdit::multiline(&mut self.bootstrap.import_mnemonics)
+                        .desired_rows(4)
+                        .hint_text("word1 word2 ... word24"),
+                );
+            }
+        } else {
+            supporting_text(
+                ui,
+                "Open an existing wallet file to review its fingerprint, role, and current multisig shape.",
             );
         }
     }
@@ -1107,61 +1364,77 @@ impl WalletApp {
                 .color(INK),
         );
         ui.add_space(6.0);
-        supporting_text(ui, "The backend mirrors the Kaspa CLI multisig flow.");
         supporting_text(
             ui,
-            "Create or import local mnemonic(s), derive local kpub(s), append remote kpubs, sort them for the shared fingerprint, then save the wallet file.",
+            "This wallet is derived from the same multisig rules as the Go kaspawallet CLI.",
         );
         ui.add_space(12.0);
 
         if let Some(summary) = &self.summary {
             metric_line(ui, "Fingerprint", summary.fingerprint.clone());
+            metric_line(ui, "Receive role", self.receive_role_label().to_owned());
             metric_line(ui, "Cosigner index", summary.cosigner_index.to_string());
-            metric_line(
-                ui,
-                "Canonical address owner",
-                bool_word(summary.is_canonical_address_owner),
-            );
-            metric_line(ui, "Path", summary.keys_file.clone());
+            mono_value(ui, "Wallet file", &summary.keys_file);
         } else {
             supporting_text(
                 ui,
-                "Load an existing keys file or create a new one to populate the wallet summary.",
+                "Once this step succeeds, the wallet fingerprint, receive role, and signer shape will appear here.",
             );
         }
 
         ui.add_space(14.0);
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Load wallet summary").clicked() {
-                self.request_wallet_summary();
+            if matches!(self.bootstrap.setup_mode, SetupMode::OpenExisting) {
+                if ui.button(self.setup_primary_action_label()).clicked() {
+                    self.request_wallet_summary();
+                }
+            } else {
+                ui.add_enabled_ui(self.setup_can_submit(), |ui| {
+                    if ui.button(self.setup_primary_action_label()).clicked() {
+                        self.request_wallet_create();
+                    }
+                });
             }
-            if ui.button("Create or recover wallet").clicked() {
-                self.request_wallet_create();
-            }
-            if ui.button("Reveal recovery material").clicked() {
+            if ui
+                .add_enabled(
+                    self.wallet_loaded() && !self.bootstrap.password.trim().is_empty(),
+                    egui::Button::new("Show recovery material"),
+                )
+                .clicked()
+            {
                 self.request_export_secrets();
             }
         });
+        supporting_text(
+            ui,
+            "Recovery material is sensitive. Only reveal it when you intend to store or verify it offline.",
+        );
     }
 
     fn render_receive_controls(&mut self, ui: &mut Ui) {
         field(ui, "Kaspa node RPC", &mut self.node_form.rpc_server);
         supporting_text(
             ui,
-            "The wallet engine starts internally and restarts automatically when this endpoint changes.",
+            "After you provide a node RPC, the app starts and restarts the internal wallet engine automatically.",
         );
         ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Connect to node").clicked() {
-                self.request_connect_node();
-            }
-            if ui.button("Check sync status").clicked() {
-                self.request_daemon_status();
-            }
-            if ui.button("Refresh balance").clicked() {
-                self.request_balance();
-            }
+        ui.add_enabled_ui(self.wallet_loaded(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Connect wallet").clicked() {
+                    self.request_connect_node();
+                }
+                if ui.button("Refresh sync").clicked() {
+                    self.request_daemon_status();
+                }
+                if ui.button("Refresh balances").clicked() {
+                    self.request_balance();
+                }
+            });
         });
+
+        if !self.wallet_loaded() {
+            supporting_text(ui, "Complete wallet setup first, then connect to a node.");
+        }
 
         ui.add_space(10.0);
         let can_issue_receive = self
@@ -1169,25 +1442,27 @@ impl WalletApp {
             .as_ref()
             .map(|summary| !summary.is_multisig || summary.is_canonical_address_owner)
             .unwrap_or(true);
-        ui.add_enabled_ui(can_issue_receive, |ui| {
-            if ui.button("Create receive address").clicked() {
+        ui.add_enabled_ui(self.wallet_ready() && can_issue_receive, |ui| {
+            if ui.button("Generate receive address").clicked() {
                 self.request_new_address();
             }
         });
         if !can_issue_receive {
             wrapped_text(
                 ui,
-                "This cosigner is not index 0. Use the canonical owner for receive addresses.",
+                "This cosigner cannot issue receive addresses. Use the primary cosigner for the receive flow.",
                 WARM_RED,
             );
         }
-        if ui.button("Show known addresses").clicked() {
-            self.request_addresses();
-        }
+        ui.add_enabled_ui(self.wallet_ready(), |ui| {
+            if ui.button("Show known addresses").clicked() {
+                self.request_addresses();
+            }
+        });
     }
 
     fn render_receive_status_panel(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Live sync state").strong());
+        ui.label(RichText::new("Wallet status").strong());
         if let Some(status) = &self.daemon_status {
             ui.label(
                 RichText::new(status.state.to_uppercase())
@@ -1205,7 +1480,7 @@ impl WalletApp {
                 mono_value(ui, "Wallet version", version);
             }
         } else {
-            supporting_text(ui, "Provide a node RPC to start syncing.");
+            supporting_text(ui, "Provide a node RPC to start syncing this wallet.");
         }
 
         ui.add_space(12.0);
@@ -1316,25 +1591,72 @@ impl WalletApp {
         }
 
         ui.add_space(10.0);
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Create unsigned").clicked() {
-                self.request_create_unsigned();
-            }
-            if ui.button("Add local signature").clicked() {
-                self.request_sign_flow();
-            }
-            if ui.button("Inspect bundle").clicked() {
-                self.request_parse_flow();
-            }
-            if ui.button("Broadcast bundle").clicked() {
-                self.request_broadcast_flow();
-            }
+        ui.add_enabled_ui(self.wallet_ready(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Create unsigned bundle").clicked() {
+                    self.request_create_unsigned();
+                }
+                if ui
+                    .add_enabled(
+                        !self.flow_hex.trim().is_empty()
+                            && !self.bootstrap.password.trim().is_empty(),
+                        egui::Button::new("Add local signature"),
+                    )
+                    .clicked()
+                {
+                    self.request_sign_flow();
+                }
+                if ui
+                    .add_enabled(
+                        !self.flow_hex.trim().is_empty(),
+                        egui::Button::new("Review bundle"),
+                    )
+                    .clicked()
+                {
+                    self.request_parse_flow();
+                }
+                if ui
+                    .add_enabled(
+                        self.flow_bundle
+                            .as_ref()
+                            .map(|bundle| bundle.fully_signed)
+                            .unwrap_or(false),
+                        egui::Button::new("Broadcast bundle"),
+                    )
+                    .clicked()
+                {
+                    self.request_broadcast_flow();
+                }
+            });
         });
+
+        if !self.wallet_ready() {
+            supporting_text(
+                ui,
+                "The wallet must be synced before you can compose or broadcast a spend.",
+            );
+        }
     }
 
     fn render_spend_status_panel(&mut self, ui: &mut Ui) {
         let stage = flow_stage(self.flow_bundle.as_ref());
         status_chip(ui, stage.0, stage.1);
+        if let Some(bundle) = &self.flow_bundle {
+            let missing = bundle
+                .transactions
+                .iter()
+                .flat_map(|tx| tx.signatures.iter())
+                .map(|progress| progress.missing_signatures)
+                .max()
+                .unwrap_or(0);
+            metric_line(ui, "Transactions", bundle.transaction_count.to_string());
+            metric_line(ui, "Missing signatures", missing.to_string());
+        } else {
+            supporting_text(
+                ui,
+                "Unsigned bundles appear here after you compose a spend.",
+            );
+        }
         if !self.last_broadcast_tx_ids.is_empty() {
             ui.add_space(8.0);
             ui.label(RichText::new("Last broadcast txids").strong());
@@ -1345,7 +1667,7 @@ impl WalletApp {
     }
 
     fn render_bootstrap_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "1. Bootstrap", "Create or recover the local cosigner file, exchange kpubs, and lock the shared wallet fingerprint.", COPPER, |ui| {
+        section_card(ui, "1. Wallet Setup", "Choose whether to open, create, or recover this multisig wallet, then confirm its fingerprint and receive role.", COPPER, |ui| {
             if ui.available_width() >= 980.0 {
                 ui.columns(2, |columns| {
                     self.render_bootstrap_editor(&mut columns[0]);
@@ -1359,19 +1681,23 @@ impl WalletApp {
                 self.render_bootstrap_summary_panel(ui);
             }
 
-            if let Some(secrets) = &self.secrets {
+            if let Some(secrets) = self.secrets.clone() {
                 ui.add_space(14.0);
-                secret_card(ui, secrets, &self.summary);
-                ui.add_space(8.0);
-                if ui.button("Clear secrets from screen").clicked() {
-                    self.secrets = None;
-                }
+                egui::CollapsingHeader::new("Sensitive recovery material")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        secret_card(ui, &secrets, &self.summary);
+                        ui.add_space(8.0);
+                        if ui.button("Clear recovery material").clicked() {
+                            self.secrets = None;
+                        }
+                    });
             }
         });
     }
 
     fn render_receive_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "2. Receive + Sync", "Provide a node RPC. The app manages the internal wallet engine and keeps receive flow on the canonical cosigner.", TEAL, |ui| {
+        section_card(ui, "2. Sync And Receive", "Connect this wallet to a Kaspa node, wait for sync, then generate receive addresses from the primary cosigner only.", TEAL, |ui| {
             if ui.available_width() >= 960.0 {
                 ui.columns(2, |columns| {
                     self.render_receive_controls(&mut columns[0]);
@@ -1388,7 +1714,7 @@ impl WalletApp {
     }
 
     fn render_spend_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "3. Spend Pipeline", "The Go backend preserves the real multisig spend flow: create unsigned transactions, collect signatures offline, then broadcast once the bundle is fully signed.", OLIVE, |ui| {
+        section_card(ui, "3. Send Funds", "Create an unsigned bundle, collect the required signatures, review the result, and broadcast only when the bundle is fully signed.", OLIVE, |ui| {
             if ui.available_width() >= 1040.0 {
                 ui.columns(2, |columns| {
                     self.render_spend_controls(&mut columns[0]);
@@ -1403,26 +1729,30 @@ impl WalletApp {
             }
 
             ui.add_space(12.0);
-            ui.label(RichText::new("Transaction bundle hex").strong());
-            ui.add(
-                TextEdit::multiline(&mut self.flow_hex)
-                    .desired_rows(8)
-                    .font(egui::TextStyle::Monospace)
-                    .hint_text("Unsigned, partially signed, or fully signed bundle hex."),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Copy bundle hex").clicked() {
-                    copy_text(ui, self.flow_hex.clone());
-                }
-                if ui.button("Use bundle hex in inspector").clicked() {
-                    self.inspector.transactions_hex = self.flow_hex.clone();
-                }
-                if ui.button("Clear bundle").clicked() {
-                    self.flow_hex.clear();
-                    self.flow_bundle = None;
-                    self.last_broadcast_tx_ids.clear();
-                }
-            });
+            egui::CollapsingHeader::new("Advanced bundle details")
+                .default_open(self.flow_bundle.is_some())
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Raw bundle hex").strong());
+                    ui.add(
+                        TextEdit::multiline(&mut self.flow_hex)
+                            .desired_rows(8)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("Unsigned, partially signed, or fully signed bundle hex."),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Copy bundle hex").clicked() {
+                            copy_text(ui, self.flow_hex.clone());
+                        }
+                        if ui.button("Use in advanced review").clicked() {
+                            self.inspector.transactions_hex = self.flow_hex.clone();
+                        }
+                        if ui.button("Clear bundle").clicked() {
+                            self.flow_hex.clear();
+                            self.flow_bundle = None;
+                            self.last_broadcast_tx_ids.clear();
+                        }
+                    });
+                });
 
             if let Some(bundle) = &self.flow_bundle {
                 ui.add_space(14.0);
@@ -1432,12 +1762,12 @@ impl WalletApp {
     }
 
     fn render_inspector_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "4. Inspector", "Review any transaction bundle offline. This is useful for audit logs, signature collection, and final broadcast checks.", OLIVE, |ui| {
+        section_card(ui, "4. Advanced Review", "Review any transaction bundle offline. Use this for audit trails, signature coordination, and final broadcast checks.", OLIVE, |ui| {
             ui.add(
                 TextEdit::multiline(&mut self.inspector.transactions_hex)
                     .desired_rows(8)
                     .font(egui::TextStyle::Monospace)
-                    .hint_text("Paste any bundle hex here for offline inspection."),
+                    .hint_text("Paste any bundle hex here for offline review."),
             );
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Parse inspector hex").clicked() {
@@ -1501,6 +1831,8 @@ impl eframe::App for WalletApp {
             )
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.render_overview_section(ui);
+                    ui.add_space(12.0);
                     self.render_bootstrap_section(ui);
                     ui.add_space(12.0);
                     self.render_receive_section(ui);
@@ -1542,21 +1874,7 @@ fn section_card<R>(
         .inner
 }
 
-fn render_header_title(ui: &mut Ui) {
-    ui.label(
-        RichText::new("Kaspa Multisig Control Room")
-            .text_style(egui::TextStyle::Name("Hero".into()))
-            .color(INK),
-    );
-}
-
-fn render_brand_lockup(ui: &mut Ui, logo_texture: Option<&egui::TextureHandle>, compact: bool) {
-    let logo_size = if compact {
-        egui::vec2(188.0, 60.0)
-    } else {
-        egui::vec2(212.0, 68.0)
-    };
-
+fn render_sidebar_brand(ui: &mut Ui, logo_texture: Option<&egui::TextureHandle>) {
     Frame::none()
         .fill(Color32::from_rgb(238, 247, 245))
         .inner_margin(egui::Margin::symmetric(16.0, 14.0))
@@ -1564,26 +1882,65 @@ fn render_brand_lockup(ui: &mut Ui, logo_texture: Option<&egui::TextureHandle>, 
         .stroke(Stroke::new(1.0, Color32::from_rgb(170, 210, 203)))
         .show(ui, |ui| {
             if let Some(texture) = logo_texture {
-                ui.add(
-                    egui::Image::new(texture)
-                        .fit_to_exact_size(logo_size)
-                        .maintain_aspect_ratio(true),
-                );
+                ui.centered_and_justified(|ui| {
+                    ui.add(
+                        egui::Image::new(texture)
+                            .fit_to_exact_size(egui::vec2(196.0, 62.0))
+                            .maintain_aspect_ratio(true),
+                    );
+                });
             } else {
-                ui.vertical(|ui| {
+                ui.centered_and_justified(|ui| {
                     ui.label(
                         RichText::new("IGRA LABS")
                             .strong()
                             .color(Color32::from_rgb(9, 35, 37))
                             .text_style(egui::TextStyle::Name("Section".into())),
                     );
-                    ui.label(
-                        RichText::new("igralabs.com")
-                            .small()
-                            .color(Color32::from_rgb(18, 94, 82)),
-                    );
                 });
             }
+        });
+}
+
+fn highlight_strip(ui: &mut Ui, label: &str, value: &str, accent: Color32) {
+    Frame::none()
+        .fill(PANEL_SOFT)
+        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+        .rounding(egui::Rounding::same(14.0))
+        .stroke(Stroke::new(1.0, accent))
+        .show(ui, |ui| {
+            ui.label(RichText::new(label).small().color(TEXT_SOFT));
+            wrapped_text(ui, value, INK);
+        });
+}
+
+fn journey_step_card(ui: &mut Ui, title: &str, description: &str, complete: bool, active: bool) {
+    let accent = if complete {
+        OLIVE
+    } else if active {
+        COPPER
+    } else {
+        TEXT_SOFT
+    };
+    let state = if complete {
+        "done"
+    } else if active {
+        "next"
+    } else {
+        "later"
+    };
+
+    Frame::none()
+        .fill(PANEL_ALT)
+        .inner_margin(egui::Margin::same(12.0))
+        .rounding(egui::Rounding::same(14.0))
+        .stroke(Stroke::new(1.0, accent))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(title).strong().color(INK));
+                status_chip(ui, state, accent);
+            });
+            supporting_text(ui, description);
         });
 }
 
@@ -1841,14 +2198,6 @@ fn parse_u64_field(name: &str, value: &str) -> Result<u64, String> {
         .trim()
         .parse::<u64>()
         .map_err(|_| format!("invalid {name}: {value}"))
-}
-
-fn bool_word(value: bool) -> String {
-    if value {
-        "yes".to_owned()
-    } else {
-        "no".to_owned()
-    }
 }
 
 fn state_color(state: Option<&str>) -> Color32 {
