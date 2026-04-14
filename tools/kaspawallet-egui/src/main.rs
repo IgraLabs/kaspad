@@ -14,29 +14,29 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const INK: Color32 = Color32::from_rgb(234, 255, 250);
-const TEXT_SOFT: Color32 = Color32::from_rgb(143, 191, 182);
-const COPPER: Color32 = Color32::from_rgb(58, 221, 190);
-const TEAL: Color32 = Color32::from_rgb(73, 234, 203);
-const SAND: Color32 = Color32::from_rgb(6, 22, 24);
-const CREAM: Color32 = Color32::from_rgb(10, 33, 36);
-const PANEL_ALT: Color32 = Color32::from_rgb(13, 44, 48);
-const PANEL_SOFT: Color32 = Color32::from_rgb(16, 56, 60);
-const STROKE: Color32 = Color32::from_rgb(31, 92, 90);
-const WARM_RED: Color32 = Color32::from_rgb(255, 122, 136);
-const OLIVE: Color32 = Color32::from_rgb(112, 199, 186);
+const INK: Color32 = Color32::from_rgb(245, 247, 250);
+const TEXT_SOFT: Color32 = Color32::from_rgb(156, 165, 177);
+const COPPER: Color32 = Color32::from_rgb(132, 168, 255);
+const TEAL: Color32 = Color32::from_rgb(179, 246, 103);
+const SAND: Color32 = Color32::from_rgb(8, 10, 14);
+const CREAM: Color32 = Color32::from_rgb(16, 20, 27);
+const PANEL_ALT: Color32 = Color32::from_rgb(21, 26, 35);
+const PANEL_SOFT: Color32 = Color32::from_rgb(27, 33, 43);
+const STROKE: Color32 = Color32::from_rgb(42, 50, 63);
+const WARM_RED: Color32 = Color32::from_rgb(255, 122, 122);
+const OLIVE: Color32 = Color32::from_rgb(120, 214, 128);
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1440.0, 960.0])
             .with_min_inner_size([1040.0, 720.0])
-            .with_title("Kaspa Multisig Control Room"),
+            .with_title("Kaspa Multisig Wallet"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Kaspa Multisig Control Room",
+        "Kaspa Multisig Wallet",
         native_options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);
@@ -144,6 +144,27 @@ impl SetupMode {
             Self::RecoverExisting => {
                 "Recover this cosigner from mnemonic phrases and rebuild the wallet file."
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkspacePage {
+    Setup,
+    Connect,
+    Receive,
+    Send,
+    Technical,
+}
+
+impl WorkspacePage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Setup => "Get Started",
+            Self::Connect => "Connect",
+            Self::Receive => "Receive",
+            Self::Send => "Send",
+            Self::Technical => "Technical",
         }
     }
 }
@@ -295,6 +316,7 @@ struct WalletApp {
     _backend: Option<BackendProcess>,
     bridge: Option<BackendClient>,
     logo_texture: Option<egui::TextureHandle>,
+    active_page: WorkspacePage,
     bootstrap: BootstrapForm,
     node_form: NodeForm,
     spend: SpendForm,
@@ -350,6 +372,7 @@ impl WalletApp {
             _backend: backend,
             bridge,
             logo_texture,
+            active_page: WorkspacePage::Setup,
             bootstrap,
             node_form,
             spend: SpendForm::new(),
@@ -392,16 +415,66 @@ impl WalletApp {
         self.engine_state() == "ready"
     }
 
-    fn receive_role_label(&self) -> &'static str {
-        if self
-            .summary
+    fn can_issue_receive(&self) -> bool {
+        self.summary
             .as_ref()
             .map(|summary| !summary.is_multisig || summary.is_canonical_address_owner)
-            .unwrap_or(false)
-        {
-            "Can create receive addresses"
+            .unwrap_or(true)
+    }
+
+    fn sync_state_label(&self) -> &'static str {
+        match self.engine_state() {
+            "ready" => "Synced",
+            "configured" | "starting" | "syncing" | "running" => "Syncing",
+            _ => "Not connected",
+        }
+    }
+
+    fn primary_stage(&self) -> (&'static str, Color32) {
+        if !self.wallet_loaded() {
+            ("Get started", COPPER)
+        } else if !self.wallet_ready() {
+            ("Connect wallet", COPPER)
+        } else if self.flow_bundle.is_some() {
+            ("Finish payment", OLIVE)
+        } else if self.can_issue_receive() {
+            ("Receive or send", TEAL)
         } else {
-            "Signing-only cosigner"
+            ("Ready to sign", TEAL)
+        }
+    }
+
+    fn page_unlocked(&self, page: WorkspacePage) -> bool {
+        match page {
+            WorkspacePage::Setup => true,
+            WorkspacePage::Connect => self.wallet_loaded(),
+            WorkspacePage::Receive => self.wallet_ready(),
+            WorkspacePage::Send => self.wallet_ready(),
+            WorkspacePage::Technical => {
+                self.flow_bundle.is_some()
+                    || !self.inspector.transactions_hex.trim().is_empty()
+                    || self.inspector_bundle.is_some()
+            }
+        }
+    }
+
+    fn recommended_page(&self) -> WorkspacePage {
+        if !self.wallet_loaded() {
+            WorkspacePage::Setup
+        } else if !self.wallet_ready() {
+            WorkspacePage::Connect
+        } else if self.flow_bundle.is_some() {
+            WorkspacePage::Send
+        } else if self.can_issue_receive() && self.last_new_address.is_none() {
+            WorkspacePage::Receive
+        } else {
+            WorkspacePage::Send
+        }
+    }
+
+    fn sync_active_page(&mut self) {
+        if !self.page_unlocked(self.active_page) {
+            self.active_page = self.recommended_page();
         }
     }
 
@@ -421,10 +494,14 @@ impl WalletApp {
         if !self.wallet_ready() {
             return "Wait for the wallet engine to finish syncing.";
         }
-        if self.addresses.is_empty() && self.last_new_address.is_none() {
-            return "Generate the next receive address or start a spend.";
+        if self.flow_bundle.is_some() {
+            return "Review the payment, collect signatures, and send when it is fully signed.";
         }
-        "Wallet is ready for receive and spend flows."
+        if self.can_issue_receive() && self.addresses.is_empty() && self.last_new_address.is_none()
+        {
+            return "Generate the next receive address or prepare a payment.";
+        }
+        "Wallet is ready for everyday receive and spend actions."
     }
 
     fn expected_remote_key_count(&self) -> u32 {
@@ -729,6 +806,7 @@ impl WalletApp {
                         Ok(summary) => {
                             self.bootstrap.keys_file = summary.keys_file.clone();
                             self.summary = Some(summary);
+                            self.active_page = WorkspacePage::Connect;
                             self.set_banner(MessageTone::Info, "Wallet loaded.");
                             self.maybe_connect_node();
                         }
@@ -751,6 +829,7 @@ impl WalletApp {
                             } else {
                                 created.canonical_owner_warning.as_str()
                             };
+                            self.active_page = WorkspacePage::Connect;
                             self.set_banner(MessageTone::Info, message);
                             self.maybe_connect_node();
                         }
@@ -762,6 +841,7 @@ impl WalletApp {
                     match result {
                         Ok(secrets) => {
                             self.secrets = Some(secrets);
+                            self.active_page = WorkspacePage::Setup;
                             self.set_banner(
                                 MessageTone::Info,
                                 "Sensitive recovery material is visible below. Clear it when finished.",
@@ -775,9 +855,17 @@ impl WalletApp {
                     self.pending.remove("daemon_status");
                     match result {
                         Ok(status) => {
+                            let was_ready = self.wallet_ready();
                             self.daemon_status = Some(status.clone());
                             if let Some(wallet) = status.wallet.clone() {
                                 self.summary = Some(wallet);
+                            }
+                            if status.state == "ready" && !was_ready {
+                                self.active_page = if self.can_issue_receive() {
+                                    WorkspacePage::Receive
+                                } else {
+                                    WorkspacePage::Send
+                                };
                             }
                             self.set_banner(MessageTone::Info, status.message.clone());
                             if status.state == "ready" && !self.pending.contains("balance") {
@@ -819,6 +907,7 @@ impl WalletApp {
                             if !self.addresses.iter().any(|item| item == &address.address) {
                                 self.addresses.insert(0, address.address.clone());
                             }
+                            self.active_page = WorkspacePage::Receive;
                             self.set_banner(
                                 MessageTone::Info,
                                 "Generated the next receive address.",
@@ -836,6 +925,7 @@ impl WalletApp {
                         Ok(bundle) => {
                             self.flow_hex = bundle.transactions_hex.clone();
                             self.flow_bundle = Some(bundle);
+                            self.active_page = WorkspacePage::Send;
                             self.set_banner(MessageTone::Info, "Spend bundle updated.");
                             if !self.pending.contains("daemon_status") {
                                 self.request_daemon_status();
@@ -849,6 +939,7 @@ impl WalletApp {
                     match result {
                         Ok(bundle) => {
                             self.inspector_bundle = Some(bundle);
+                            self.active_page = WorkspacePage::Technical;
                         }
                         Err(err) => self.set_banner(MessageTone::Error, err),
                     }
@@ -858,6 +949,7 @@ impl WalletApp {
                     match result {
                         Ok(response) => {
                             self.last_broadcast_tx_ids = response.tx_ids.clone();
+                            self.active_page = WorkspacePage::Send;
                             self.set_banner(
                                 MessageTone::Info,
                                 format!("Broadcast {} transaction(s).", response.tx_ids.len()),
@@ -908,305 +1000,96 @@ impl WalletApp {
     }
 
     fn render_top_bar(&mut self, ui: &mut Ui) {
-        let status_text = if self.bridge.is_some() {
-            "Bridge online"
-        } else {
-            "Bridge offline"
-        };
-        let daemon_state = self
-            .daemon_status
-            .as_ref()
-            .map(|status| status.state.to_uppercase())
-            .unwrap_or_else(|| "STOPPED".to_owned());
-
-        Frame::none()
-            .fill(PANEL_ALT)
-            .inner_margin(egui::Margin::same(18.0))
-            .rounding(egui::Rounding::same(18.0))
-            .stroke(Stroke::new(1.0, STROKE))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Kaspa Multisig Wallet")
-                        .text_style(egui::TextStyle::Name("Hero".into()))
-                        .color(INK),
-                );
-                supporting_text(
-                    ui,
-                    "Set up a multisig wallet, connect to a Kaspa node, receive funds, collect signatures, and broadcast when the bundle is ready.",
-                );
-                ui.add_space(10.0);
-                ui.horizontal_wrapped(|ui| {
-                    status_chip(
-                        ui,
-                        status_text,
-                        if self.bridge.is_some() { TEAL } else { WARM_RED },
+        let (stage_label, stage_color) = self.primary_stage();
+        if ui.available_width() >= 980.0 {
+            ui.columns(2, |columns| {
+                columns[0].vertical(|ui| {
+                    ui.label(
+                        RichText::new("Kaspa Multisig Wallet")
+                            .text_style(egui::TextStyle::Name("Hero".into()))
+                            .color(INK),
                     );
-                    status_chip(
-                        ui,
-                        &daemon_state,
-                        state_color(
-                            self.daemon_status
-                                .as_ref()
-                                .map(|state| state.state.as_str()),
-                        ),
-                    );
-                    status_chip(ui, self.receive_role_label(), COPPER);
+                    ui.add_space(2.0);
+                    wrapped_text(ui, self.next_action(), TEXT_SOFT);
                 });
-                ui.add_space(10.0);
-                highlight_strip(ui, "Next step", self.next_action(), COPPER);
+                columns[1].vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        status_chip(ui, stage_label, stage_color);
+                        status_chip(
+                            ui,
+                            self.sync_state_label(),
+                            state_color(Some(self.engine_state())),
+                        );
+                    });
+                });
             });
+        } else {
+            ui.label(
+                RichText::new("Kaspa Multisig Wallet")
+                    .text_style(egui::TextStyle::Name("Hero".into()))
+                    .color(INK),
+            );
+            ui.add_space(2.0);
+            wrapped_text(ui, self.next_action(), TEXT_SOFT);
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                status_chip(ui, stage_label, stage_color);
+                status_chip(
+                    ui,
+                    self.sync_state_label(),
+                    state_color(Some(self.engine_state())),
+                );
+            });
+        }
     }
 
     fn render_sidebar(&mut self, ui: &mut Ui) {
+        let (stage_label, stage_color) = self.primary_stage();
         render_sidebar_brand(ui, self.logo_texture.as_ref());
+        ui.add_space(14.0);
+        ui.label(RichText::new("Workspace").small().strong().color(TEXT_SOFT));
+        ui.add_space(8.0);
+        let mut pages = vec![
+            WorkspacePage::Setup,
+            WorkspacePage::Connect,
+            WorkspacePage::Receive,
+            WorkspacePage::Send,
+        ];
+        if self.page_unlocked(WorkspacePage::Technical)
+            || self.active_page == WorkspacePage::Technical
+        {
+            pages.push(WorkspacePage::Technical);
+        }
 
-        side_card(ui, "Journey", CREAM, |ui| {
-            journey_step_card(
+        for page in pages {
+            if workspace_nav_item(
                 ui,
-                "1. Wallet setup",
-                "Create, recover, or open a multisig wallet file.",
-                self.wallet_loaded(),
-                !self.wallet_loaded(),
-            );
-            journey_step_card(
-                ui,
-                "2. Node connection",
-                "Connect the wallet to a Kaspa node and let the app manage sync.",
-                matches!(
-                    self.engine_state(),
-                    "configured" | "starting" | "syncing" | "running" | "ready"
-                ),
-                self.wallet_loaded() && !self.wallet_ready(),
-            );
-            journey_step_card(
-                ui,
-                "3. Receive funds",
-                "Generate receive addresses from the primary cosigner and monitor wallet balances.",
-                self.wallet_ready()
-                    && (!self.addresses.is_empty() || self.last_new_address.is_some()),
-                self.wallet_ready() && self.flow_bundle.is_none(),
-            );
-            journey_step_card(
-                ui,
-                "4. Send funds",
-                "Create an unsigned bundle, add signatures, then broadcast.",
-                !self.last_broadcast_tx_ids.is_empty(),
-                self.wallet_ready() && self.last_broadcast_tx_ids.is_empty(),
-            );
-        });
-
-        side_card(ui, "Wallet Snapshot", PANEL_ALT, |ui| {
-            metric_line(
-                ui,
-                "Network",
-                self.bootstrap.network.display_name().to_owned(),
-            );
-            metric_line(
-                ui,
-                "Signer threshold",
-                self.summary
-                    .as_ref()
-                    .map(|summary| {
-                        format!(
-                            "{} of {}",
-                            summary.minimum_signatures, summary.public_key_count
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        format!(
-                            "{} of {}",
-                            self.bootstrap.minimum_signatures, self.bootstrap.num_public_keys
-                        )
-                    }),
-            );
-            metric_line(
-                ui,
-                "Cosigner index",
-                self.summary
-                    .as_ref()
-                    .map(|summary| summary.cosigner_index.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
-            );
-            metric_line(
-                ui,
-                "Fingerprint",
-                self.summary
-                    .as_ref()
-                    .map(|summary| summary.fingerprint.clone())
-                    .unwrap_or_else(|| "load wallet".to_owned()),
-            );
-            metric_line(
-                ui,
-                "Owned keys",
-                self.summary
-                    .as_ref()
-                    .map(|summary| {
-                        format!(
-                            "{} local / {} total",
-                            summary.owned_key_count, summary.public_key_count
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        format!(
-                            "{} local / {} total",
-                            self.bootstrap.num_private_keys, self.bootstrap.num_public_keys
-                        )
-                    }),
-            );
-            metric_line(
-                ui,
-                "Canonical receive owner",
-                if self
-                    .summary
-                    .as_ref()
-                    .map(|summary| summary.is_canonical_address_owner)
-                    .unwrap_or(false)
-                {
-                    "yes".to_owned()
-                } else {
-                    "no".to_owned()
-                },
-            );
-            metric_line(ui, "Receive role", self.receive_role_label().to_owned());
-        });
-
-        side_card(ui, "Live Wallet", CREAM, |ui| {
-            let state = self
-                .daemon_status
-                .as_ref()
-                .map(|status| status.state.clone())
-                .unwrap_or_else(|| "stopped".to_owned());
-            let message = self
-                .daemon_status
-                .as_ref()
-                .map(|status| status.message.clone())
-                .unwrap_or_else(|| {
-                    "The app will start the internal wallet engine when a node RPC is configured."
-                        .to_owned()
-                });
-            ui.label(
-                RichText::new(state.to_uppercase())
-                    .strong()
-                    .color(state_color(Some(state.as_str()))),
-            );
-            ui.add_space(6.0);
-            wrapped_text(ui, &message, INK);
-            if let Some(status) = &self.daemon_status {
-                if !status.rpc_server.is_empty() {
-                    ui.add_space(8.0);
-                    mono_value(ui, "Node RPC", &status.rpc_server);
-                }
-                if let Some(version) = &status.wallet_version {
-                    mono_value(ui, "Wallet version", version);
-                }
+                page,
+                self.active_page == page,
+                self.page_unlocked(page),
+                page == self.recommended_page(),
+            ) {
+                self.active_page = page;
             }
-            if let Some(balance) = &self.balance {
-                ui.add_space(10.0);
-                metric_line(ui, "Available", format!("{} KAS", balance.available_kas));
-                metric_line(ui, "Pending", format!("{} KAS", balance.pending_kas));
-                metric_line(ui, "Live addresses", balance.addresses.len().to_string());
-            } else {
-                supporting_text(
-                    ui,
-                    "Connect the wallet to a node RPC to load live balances.",
-                );
-            }
-        });
+            ui.add_space(2.0);
+        }
 
-        side_card(ui, "Multisig Notes", PANEL_ALT, |ui| {
-            wrapped_text(
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(12.0);
+        ui.label(RichText::new("Status").small().strong().color(TEXT_SOFT));
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            status_chip(ui, stage_label, stage_color);
+            status_chip(
                 ui,
-                "All cosigners must use the same sorted set of public keys to share one fingerprint.",
-                INK,
-            );
-            wrapped_text(
-                ui,
-                "Only the primary cosigner should create receive addresses for the wallet.",
-                INK,
-            );
-            wrapped_text(
-                ui,
-                "Spending always follows the same path: create unsigned bundle, add signatures, then broadcast.",
-                INK,
-            );
-            wrapped_text(
-                ui,
-                "The app restarts the internal wallet engine when the node RPC changes, and large spends can create multi-transaction bundles.",
-                INK,
+                self.sync_state_label(),
+                state_color(Some(self.engine_state())),
             );
         });
-    }
-
-    fn render_overview_section(&mut self, ui: &mut Ui) {
-        section_card(
-            ui,
-            "Overview",
-            "This screen tracks the current wallet, node connection, receive role, and next action.",
-            TEAL,
-            |ui| {
-                if ui.available_width() >= 980.0 {
-                    ui.columns(2, |columns| {
-                        columns[0].vertical(|ui| {
-                            metric_line(
-                                ui,
-                                "Wallet",
-                                if self.wallet_loaded() {
-                                    "Loaded".to_owned()
-                                } else {
-                                    "Not loaded yet".to_owned()
-                                },
-                            );
-                            metric_line(
-                                ui,
-                                "Engine state",
-                                self.engine_state().to_uppercase(),
-                            );
-                            metric_line(
-                                ui,
-                                "Receive role",
-                                self.receive_role_label().to_owned(),
-                            );
-                            if let Some(summary) = &self.summary {
-                                metric_line(ui, "Fingerprint", summary.fingerprint.clone());
-                            }
-                        });
-                        columns[1].vertical(|ui| {
-                            highlight_strip(ui, "What to do now", self.next_action(), TEAL);
-                            if let Some(balance) = &self.balance {
-                                ui.add_space(10.0);
-                                metric_line(
-                                    ui,
-                                    "Available balance",
-                                    format!("{} KAS", balance.available_kas),
-                                );
-                                metric_line(
-                                    ui,
-                                    "Pending balance",
-                                    format!("{} KAS", balance.pending_kas),
-                                );
-                            }
-                        });
-                    });
-                } else {
-                    metric_line(
-                        ui,
-                        "Wallet",
-                        if self.wallet_loaded() {
-                            "Loaded".to_owned()
-                        } else {
-                            "Not loaded yet".to_owned()
-                        },
-                    );
-                    metric_line(ui, "Engine state", self.engine_state().to_uppercase());
-                    metric_line(ui, "Receive role", self.receive_role_label().to_owned());
-                    if let Some(summary) = &self.summary {
-                        metric_line(ui, "Fingerprint", summary.fingerprint.clone());
-                    }
-                    ui.add_space(10.0);
-                    highlight_strip(ui, "What to do now", self.next_action(), TEAL);
-                }
-            },
-        );
+        ui.add_space(8.0);
+        ui.label(RichText::new(self.active_page.label()).strong().color(INK));
+        supporting_text(ui, self.next_action());
     }
 
     fn render_bootstrap_editor(&mut self, ui: &mut Ui) {
@@ -1233,9 +1116,10 @@ impl WalletApp {
             matches!(self.bootstrap.setup_mode, SetupMode::RecoverExisting);
 
         let previous_network = self.bootstrap.network;
-        ui.add_space(8.0);
+        ui.add_space(12.0);
+        ui.label(RichText::new("Wallet details").strong());
         ui.horizontal_wrapped(|ui| {
-            ui.label("Network");
+            ui.label(RichText::new("Network").small().strong().color(TEXT_SOFT));
             ComboBox::from_id_salt("bootstrap_network")
                 .selected_text(self.bootstrap.network.display_name())
                 .show_ui(ui, |ui| {
@@ -1264,133 +1148,210 @@ impl WalletApp {
                 self.bootstrap.sync_defaults();
                 self.node_form.sync_defaults(self.bootstrap.network);
             }
-            if ui.button("Use defaults").clicked() {
+            if ui.add(secondary_button("Use defaults")).clicked() {
                 self.bootstrap.sync_defaults();
                 self.node_form.sync_defaults(self.bootstrap.network);
             }
         });
-
-        ui.add_space(8.0);
         field(ui, "Wallet file", &mut self.bootstrap.keys_file);
 
-        if matches!(
-            self.bootstrap.setup_mode,
-            SetupMode::CreateNew | SetupMode::RecoverExisting
-        ) {
-            password_field(ui, "Wallet password", &mut self.bootstrap.password);
-
-            ui.horizontal_wrapped(|ui| {
-                numeric_drag(
-                    ui,
-                    "Required signatures",
-                    &mut self.bootstrap.minimum_signatures,
-                    1..=16,
-                );
-                numeric_drag(
-                    ui,
-                    "Local keys",
-                    &mut self.bootstrap.num_private_keys,
-                    1..=16,
-                );
-                numeric_drag(
-                    ui,
-                    "Total cosigners",
-                    &mut self.bootstrap.num_public_keys,
-                    1..=16,
-                );
-            });
-            ui.checkbox(&mut self.bootstrap.ecdsa, "Use ECDSA wallet");
-            ui.checkbox(
-                &mut self.bootstrap.overwrite,
-                "Replace an existing wallet file",
-            );
-
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "Remote cosigner public keys ({} expected)",
-                        self.expected_remote_key_count()
-                    ))
-                    .strong(),
-                );
-                let remote_complete =
-                    self.provided_remote_key_count() == self.expected_remote_key_count() as usize;
-                status_chip(
-                    ui,
-                    format!(
-                        "{} of {} provided",
-                        self.provided_remote_key_count(),
-                        self.expected_remote_key_count()
-                    ),
-                    if remote_complete { OLIVE } else { WARM_RED },
-                );
-            });
-            supporting_text(
-                ui,
-                "Paste one remote extended public key per line. The app validates the expected cosigner count before creating the wallet.",
-            );
-            ui.add(
-                TextEdit::multiline(&mut self.bootstrap.remote_public_keys)
-                    .desired_rows(6)
-                    .hint_text("kpub... one per line"),
-            );
-
-            if matches!(self.bootstrap.setup_mode, SetupMode::RecoverExisting) {
-                ui.add_space(8.0);
-                ui.label(RichText::new("Recovery phrases").strong());
+        match self.bootstrap.setup_mode {
+            SetupMode::OpenExisting => {
                 supporting_text(
                     ui,
-                    "Enter one mnemonic phrase per local key. The count must match the number of local keys.",
+                    "Use this path when the signer file already exists and you only need to load it into the app.",
+                );
+            }
+            SetupMode::CreateNew => {
+                ui.add_space(12.0);
+                ui.label(RichText::new("Create signer").strong());
+                supporting_text(
+                    ui,
+                    "Set a password first, then define the multisig policy and add the public keys from the other cosigners.",
+                );
+                password_field(ui, "Wallet password", &mut self.bootstrap.password);
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("Multisig policy").strong());
+                supporting_text(
+                    ui,
+                    "Choose how many cosigners exist and how many signatures are required to approve a payment.",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    numeric_drag(
+                        ui,
+                        "Required signatures",
+                        &mut self.bootstrap.minimum_signatures,
+                        1..=16,
+                    );
+                    numeric_drag(
+                        ui,
+                        "Local keys",
+                        &mut self.bootstrap.num_private_keys,
+                        1..=16,
+                    );
+                    numeric_drag(
+                        ui,
+                        "Total cosigners",
+                        &mut self.bootstrap.num_public_keys,
+                        1..=16,
+                    );
+                });
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("Other cosigners").strong());
+                supporting_text(
+                    ui,
+                    &format!(
+                        "Paste the public keys from the other cosigners here. {} key(s) expected for this signer file.",
+                        self.expected_remote_key_count()
+                    ),
+                );
+                ui.add(
+                    TextEdit::multiline(&mut self.bootstrap.remote_public_keys)
+                        .desired_rows(6)
+                        .hint_text("kpub... one per line"),
+                );
+
+                ui.add_space(10.0);
+                egui::CollapsingHeader::new("Advanced wallet settings")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.checkbox(&mut self.bootstrap.ecdsa, "Use ECDSA wallet");
+                        ui.checkbox(
+                            &mut self.bootstrap.overwrite,
+                            "Replace an existing wallet file",
+                        );
+                    });
+            }
+            SetupMode::RecoverExisting => {
+                ui.add_space(12.0);
+                ui.label(RichText::new("Recover signer").strong());
+                supporting_text(
+                    ui,
+                    "Rebuild this signer file from recovery words, then add the public keys from the other cosigners.",
+                );
+                password_field(ui, "Wallet password", &mut self.bootstrap.password);
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("Multisig policy").strong());
+                ui.horizontal_wrapped(|ui| {
+                    numeric_drag(
+                        ui,
+                        "Required signatures",
+                        &mut self.bootstrap.minimum_signatures,
+                        1..=16,
+                    );
+                    numeric_drag(
+                        ui,
+                        "Local keys",
+                        &mut self.bootstrap.num_private_keys,
+                        1..=16,
+                    );
+                    numeric_drag(
+                        ui,
+                        "Total cosigners",
+                        &mut self.bootstrap.num_public_keys,
+                        1..=16,
+                    );
+                });
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("Other cosigners").strong());
+                supporting_text(
+                    ui,
+                    &format!(
+                        "Paste the public keys from the other cosigners here. {} key(s) expected for this signer file.",
+                        self.expected_remote_key_count()
+                    ),
+                );
+                ui.add(
+                    TextEdit::multiline(&mut self.bootstrap.remote_public_keys)
+                        .desired_rows(6)
+                        .hint_text("kpub... one per line"),
+                );
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("Recovery words").strong());
+                supporting_text(
+                    ui,
+                    "Enter one mnemonic phrase per local key. The count must match the number of local keys in this signer file.",
                 );
                 ui.add(
                     TextEdit::multiline(&mut self.bootstrap.import_mnemonics)
                         .desired_rows(4)
                         .hint_text("word1 word2 ... word24"),
                 );
+
+                ui.add_space(10.0);
+                egui::CollapsingHeader::new("Advanced wallet settings")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.checkbox(&mut self.bootstrap.ecdsa, "Use ECDSA wallet");
+                        ui.checkbox(
+                            &mut self.bootstrap.overwrite,
+                            "Replace an existing wallet file",
+                        );
+                    });
             }
-        } else {
-            supporting_text(
-                ui,
-                "Open an existing wallet file to review its fingerprint, role, and current multisig shape.",
-            );
         }
     }
 
     fn render_bootstrap_summary_panel(&mut self, ui: &mut Ui) {
         ui.label(
-            RichText::new("Bootstrap validation")
+            RichText::new("Wallet details")
                 .text_style(egui::TextStyle::Name("Section".into()))
                 .color(INK),
         );
         ui.add_space(6.0);
         supporting_text(
             ui,
-            "This wallet is derived from the same multisig rules as the Go kaspawallet CLI.",
+            "Once the wallet file is ready, you can connect it to a node and continue with receive or send actions.",
         );
         ui.add_space(12.0);
 
         if let Some(summary) = &self.summary {
             metric_line(ui, "Fingerprint", summary.fingerprint.clone());
-            metric_line(ui, "Receive role", self.receive_role_label().to_owned());
-            metric_line(ui, "Cosigner index", summary.cosigner_index.to_string());
+            metric_line(ui, "Your signer slot", summary.cosigner_index.to_string());
             mono_value(ui, "Wallet file", &summary.keys_file);
+            ui.add_space(10.0);
+            if self.can_issue_receive() {
+                highlight_strip(
+                    ui,
+                    "Wallet role",
+                    "This signer file can generate receive addresses and can also sign payments.",
+                    TEAL,
+                );
+            } else {
+                highlight_strip(
+                    ui,
+                    "Wallet role",
+                    "This signer file can sign payments but cannot generate receive addresses. Use the primary signer to receive funds.",
+                    WARM_RED,
+                );
+            }
         } else {
             supporting_text(
                 ui,
-                "Once this step succeeds, the wallet fingerprint, receive role, and signer shape will appear here.",
+                "Complete this step to load the signer fingerprint and receive permissions for this wallet.",
             );
         }
 
         ui.add_space(14.0);
         ui.horizontal_wrapped(|ui| {
             if matches!(self.bootstrap.setup_mode, SetupMode::OpenExisting) {
-                if ui.button(self.setup_primary_action_label()).clicked() {
+                if ui
+                    .add(primary_button(self.setup_primary_action_label()))
+                    .clicked()
+                {
                     self.request_wallet_summary();
                 }
             } else {
                 ui.add_enabled_ui(self.setup_can_submit(), |ui| {
-                    if ui.button(self.setup_primary_action_label()).clicked() {
+                    if ui
+                        .add(primary_button(self.setup_primary_action_label()))
+                        .clicked()
+                    {
                         self.request_wallet_create();
                     }
                 });
@@ -1398,7 +1359,7 @@ impl WalletApp {
             if ui
                 .add_enabled(
                     self.wallet_loaded() && !self.bootstrap.password.trim().is_empty(),
-                    egui::Button::new("Show recovery material"),
+                    secondary_button("Show recovery material"),
                 )
                 .clicked()
             {
@@ -1407,96 +1368,111 @@ impl WalletApp {
         });
         supporting_text(
             ui,
-            "Recovery material is sensitive. Only reveal it when you intend to store or verify it offline.",
+            "Recovery words are sensitive. Reveal them only when you are ready to store or verify them offline.",
+        );
+    }
+
+    fn render_connect_section(&mut self, ui: &mut Ui) {
+        section_card(
+            ui,
+            "Connect Wallet",
+            "Attach this signer file to a Kaspa node. The app manages the wallet engine for you in the background.",
+            COPPER,
+            |ui| {
+                field(ui, "Node endpoint", &mut self.node_form.rpc_server);
+                supporting_text(
+                    ui,
+                    "You only need to provide the node endpoint. Starting, restarting, and health checks happen automatically.",
+                );
+                ui.add_space(10.0);
+                ui.add_enabled_ui(self.wallet_loaded(), |ui| {
+                    if ui.add(primary_button("Connect and sync")).clicked() {
+                        self.request_connect_node();
+                    }
+                });
+
+                if !self.wallet_loaded() {
+                    supporting_text(
+                        ui,
+                        "Complete wallet setup first, then return here to connect and sync.",
+                    );
+                }
+
+                ui.add_space(14.0);
+                self.render_receive_status_panel(ui);
+            },
         );
     }
 
     fn render_receive_controls(&mut self, ui: &mut Ui) {
-        field(ui, "Kaspa node RPC", &mut self.node_form.rpc_server);
-        supporting_text(
-            ui,
-            "After you provide a node RPC, the app starts and restarts the internal wallet engine automatically.",
-        );
-        ui.add_space(8.0);
-        ui.add_enabled_ui(self.wallet_loaded(), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Connect wallet").clicked() {
-                    self.request_connect_node();
-                }
-                if ui.button("Refresh sync").clicked() {
-                    self.request_daemon_status();
-                }
-                if ui.button("Refresh balances").clicked() {
-                    self.request_balance();
-                }
-            });
-        });
-
-        if !self.wallet_loaded() {
-            supporting_text(ui, "Complete wallet setup first, then connect to a node.");
+        if !self.wallet_ready() {
+            supporting_text(
+                ui,
+                "Wait until the wallet is synced before requesting the next receive address.",
+            );
+            return;
         }
 
-        ui.add_space(10.0);
-        let can_issue_receive = self
-            .summary
-            .as_ref()
-            .map(|summary| !summary.is_multisig || summary.is_canonical_address_owner)
-            .unwrap_or(true);
-        ui.add_enabled_ui(self.wallet_ready() && can_issue_receive, |ui| {
-            if ui.button("Generate receive address").clicked() {
+        ui.label(RichText::new("Receive funds").strong());
+        supporting_text(
+            ui,
+            "Generate the next receive address only from the cosigner that owns receive addresses for this wallet.",
+        );
+        ui.add_space(8.0);
+        ui.add_enabled_ui(self.can_issue_receive(), |ui| {
+            if ui.add(primary_button("Generate receive address")).clicked() {
                 self.request_new_address();
             }
         });
-        if !can_issue_receive {
+        if !self.can_issue_receive() {
             wrapped_text(
                 ui,
-                "This cosigner cannot issue receive addresses. Use the primary cosigner for the receive flow.",
+                "This signer can approve payments but cannot create receive addresses. Use the primary receive-capable cosigner instead.",
                 WARM_RED,
             );
         }
-        ui.add_enabled_ui(self.wallet_ready(), |ui| {
-            if ui.button("Show known addresses").clicked() {
-                self.request_addresses();
-            }
-        });
+
+        if let Some(address) = &self.last_new_address {
+            ui.add_space(12.0);
+            mono_value(ui, "Current receive address", address);
+        }
     }
 
     fn render_receive_status_panel(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Wallet status").strong());
+        ui.label(RichText::new("Connection details").strong());
+        ui.label(
+            RichText::new(self.sync_state_label())
+                .color(state_color(Some(self.engine_state())))
+                .strong(),
+        );
         if let Some(status) = &self.daemon_status {
-            ui.label(
-                RichText::new(status.state.to_uppercase())
-                    .color(state_color(Some(status.state.as_str())))
-                    .strong(),
-            );
             wrapped_text(ui, &status.message, INK);
             if let Some(started_at) = &status.started_at {
                 metric_line(ui, "Started", started_at.clone());
             }
             if !status.rpc_server.is_empty() {
-                mono_value(ui, "Node RPC", &status.rpc_server);
+                mono_value(ui, "Node endpoint", &status.rpc_server);
             }
             if let Some(version) = &status.wallet_version {
-                mono_value(ui, "Wallet version", version);
+                metric_line(ui, "Wallet engine", version.clone());
             }
         } else {
             supporting_text(ui, "Provide a node RPC to start syncing this wallet.");
         }
 
-        ui.add_space(12.0);
-        if let Some(address) = &self.last_new_address {
-            mono_value(ui, "Latest receive address", address);
-        }
-        if !self.addresses.is_empty() {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Known receive addresses").strong());
-            for address in self.addresses.iter().take(6) {
-                mono_line(ui, address);
-            }
+        ui.add_space(10.0);
+        if ui.add(secondary_button("Refresh sync")).clicked() {
+            self.request_daemon_status();
         }
     }
 
     fn render_spend_controls(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Prepare payment").strong());
+        supporting_text(
+            ui,
+            "Start with the destination and amount. Extra routing and fee controls stay hidden unless you need them.",
+        );
+        ui.add_space(8.0);
         field(ui, "Destination", &mut self.spend.to_address);
         if ui.available_width() < 520.0 {
             ui.vertical(|ui| {
@@ -1513,135 +1489,121 @@ impl WalletApp {
                 }
             });
         }
-        ui.checkbox(
-            &mut self.spend.use_existing_change_address,
-            "Prefer an existing change address",
-        );
-        ui.label(RichText::new("From addresses (optional)").strong());
-        supporting_text(
-            ui,
-            "Filter UTXOs by wallet address. Leave blank to spend from the full wallet set.",
-        );
-        ui.add(
-            TextEdit::multiline(&mut self.spend.from_addresses)
-                .desired_rows(3)
-                .hint_text("one address per line"),
-        );
-
-        ui.add_space(10.0);
-        if ui.available_width() < 520.0 {
-            ui.vertical(|ui| {
-                ui.label("Fee policy");
-                ComboBox::from_id_salt("fee_mode")
-                    .selected_text(self.spend.fee_mode.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.spend.fee_mode,
-                            FeeMode::Estimate,
-                            FeeMode::Estimate.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.spend.fee_mode,
-                            FeeMode::ExactFeeRate,
-                            FeeMode::ExactFeeRate.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.spend.fee_mode,
-                            FeeMode::MaxFeeRate,
-                            FeeMode::MaxFeeRate.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.spend.fee_mode,
-                            FeeMode::MaxFee,
-                            FeeMode::MaxFee.label(),
-                        );
-                    });
-            });
-        } else {
-            ui.horizontal(|ui| {
-                ui.label("Fee policy");
-                ComboBox::from_id_salt("fee_mode")
-                    .selected_text(self.spend.fee_mode.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.spend.fee_mode,
-                            FeeMode::Estimate,
-                            FeeMode::Estimate.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.spend.fee_mode,
-                            FeeMode::ExactFeeRate,
-                            FeeMode::ExactFeeRate.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.spend.fee_mode,
-                            FeeMode::MaxFeeRate,
-                            FeeMode::MaxFeeRate.label(),
-                        );
-                        ui.selectable_value(
-                            &mut self.spend.fee_mode,
-                            FeeMode::MaxFee,
-                            FeeMode::MaxFee.label(),
-                        );
-                    });
-            });
-        }
-        if self.spend.fee_mode != FeeMode::Estimate {
-            field(ui, "Fee value", &mut self.spend.fee_value);
-        }
 
         ui.add_space(10.0);
         ui.add_enabled_ui(self.wallet_ready(), |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Create unsigned bundle").clicked() {
-                    self.request_create_unsigned();
-                }
-                if ui
-                    .add_enabled(
-                        !self.flow_hex.trim().is_empty()
-                            && !self.bootstrap.password.trim().is_empty(),
-                        egui::Button::new("Add local signature"),
-                    )
-                    .clicked()
-                {
-                    self.request_sign_flow();
-                }
-                if ui
-                    .add_enabled(
-                        !self.flow_hex.trim().is_empty(),
-                        egui::Button::new("Review bundle"),
-                    )
-                    .clicked()
-                {
-                    self.request_parse_flow();
-                }
-                if ui
-                    .add_enabled(
-                        self.flow_bundle
-                            .as_ref()
-                            .map(|bundle| bundle.fully_signed)
-                            .unwrap_or(false),
-                        egui::Button::new("Broadcast bundle"),
-                    )
-                    .clicked()
-                {
-                    self.request_broadcast_flow();
-                }
-            });
+            if ui.add(primary_button("Prepare payment")).clicked() {
+                self.request_create_unsigned();
+            }
         });
 
         if !self.wallet_ready() {
             supporting_text(
                 ui,
-                "The wallet must be synced before you can compose or broadcast a spend.",
+                "The wallet must finish syncing before you can prepare a payment.",
             );
         }
+
+        ui.add_space(10.0);
+        egui::CollapsingHeader::new("Advanced payment options")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.checkbox(
+                    &mut self.spend.use_existing_change_address,
+                    "Prefer an existing change address",
+                );
+                ui.label(RichText::new("From addresses (optional)").strong());
+                supporting_text(
+                    ui,
+                    "Restrict UTXOs to specific wallet addresses. Leave blank to spend from the full wallet.",
+                );
+                ui.add(
+                    TextEdit::multiline(&mut self.spend.from_addresses)
+                        .desired_rows(3)
+                        .hint_text("one address per line"),
+                );
+
+                ui.add_space(10.0);
+                if ui.available_width() < 520.0 {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Fee policy")
+                                .small()
+                                .strong()
+                                .color(TEXT_SOFT),
+                        );
+                        ComboBox::from_id_salt("fee_mode")
+                            .selected_text(self.spend.fee_mode.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.spend.fee_mode,
+                                    FeeMode::Estimate,
+                                    FeeMode::Estimate.label(),
+                                );
+                                ui.selectable_value(
+                                    &mut self.spend.fee_mode,
+                                    FeeMode::ExactFeeRate,
+                                    FeeMode::ExactFeeRate.label(),
+                                );
+                                ui.selectable_value(
+                                    &mut self.spend.fee_mode,
+                                    FeeMode::MaxFeeRate,
+                                    FeeMode::MaxFeeRate.label(),
+                                );
+                                ui.selectable_value(
+                                    &mut self.spend.fee_mode,
+                                    FeeMode::MaxFee,
+                                    FeeMode::MaxFee.label(),
+                                );
+                            });
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Fee policy")
+                                .small()
+                                .strong()
+                                .color(TEXT_SOFT),
+                        );
+                        ComboBox::from_id_salt("fee_mode")
+                            .selected_text(self.spend.fee_mode.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.spend.fee_mode,
+                                    FeeMode::Estimate,
+                                    FeeMode::Estimate.label(),
+                                );
+                                ui.selectable_value(
+                                    &mut self.spend.fee_mode,
+                                    FeeMode::ExactFeeRate,
+                                    FeeMode::ExactFeeRate.label(),
+                                );
+                                ui.selectable_value(
+                                    &mut self.spend.fee_mode,
+                                    FeeMode::MaxFeeRate,
+                                    FeeMode::MaxFeeRate.label(),
+                                );
+                                ui.selectable_value(
+                                    &mut self.spend.fee_mode,
+                                    FeeMode::MaxFee,
+                                    FeeMode::MaxFee.label(),
+                                );
+                            });
+                    });
+                }
+                if self.spend.fee_mode != FeeMode::Estimate {
+                    field(ui, "Fee value", &mut self.spend.fee_value);
+                }
+            });
     }
 
     fn render_spend_status_panel(&mut self, ui: &mut Ui) {
         let stage = flow_stage(self.flow_bundle.as_ref());
+        ui.label(RichText::new("Review and finish").strong());
+        ui.add_space(6.0);
         status_chip(ui, stage.0, stage.1);
         if let Some(bundle) = &self.flow_bundle {
+            let fully_signed = bundle.fully_signed;
             let missing = bundle
                 .transactions
                 .iter()
@@ -1651,44 +1613,56 @@ impl WalletApp {
                 .unwrap_or(0);
             metric_line(ui, "Transactions", bundle.transaction_count.to_string());
             metric_line(ui, "Missing signatures", missing.to_string());
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.flow_hex.trim().is_empty()
+                            && !self.bootstrap.password.trim().is_empty(),
+                        secondary_button("Sign locally"),
+                    )
+                    .clicked()
+                {
+                    self.request_sign_flow();
+                }
+                if ui
+                    .add_enabled(
+                        !self.flow_hex.trim().is_empty(),
+                        secondary_button("Review transaction"),
+                    )
+                    .clicked()
+                {
+                    self.request_parse_flow();
+                }
+                if ui
+                    .add_enabled(fully_signed, primary_button("Send now"))
+                    .clicked()
+                {
+                    self.request_broadcast_flow();
+                }
+            });
         } else {
             supporting_text(
                 ui,
-                "Unsigned bundles appear here after you compose a spend.",
+                "Prepared payments appear here after you create the first unsigned bundle.",
             );
-        }
-        if !self.last_broadcast_tx_ids.is_empty() {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Last broadcast txids").strong());
-            for txid in &self.last_broadcast_tx_ids {
-                mono_line(ui, txid);
-            }
         }
     }
 
     fn render_bootstrap_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "1. Wallet Setup", "Choose whether to open, create, or recover this multisig wallet, then confirm its fingerprint and receive role.", COPPER, |ui| {
-            if ui.available_width() >= 980.0 {
-                ui.columns(2, |columns| {
-                    self.render_bootstrap_editor(&mut columns[0]);
-                    self.render_bootstrap_summary_panel(&mut columns[1]);
-                });
-            } else {
-                self.render_bootstrap_editor(ui);
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(12.0);
-                self.render_bootstrap_summary_panel(ui);
-            }
+        section_card(ui, "1. Get Started", "Choose one wallet action first. The rest of the app stays quiet until this signer file is ready.", COPPER, |ui| {
+            self.render_bootstrap_editor(ui);
+            ui.add_space(16.0);
+            self.render_bootstrap_summary_panel(ui);
 
             if let Some(secrets) = self.secrets.clone() {
                 ui.add_space(14.0);
-                egui::CollapsingHeader::new("Sensitive recovery material")
-                    .default_open(true)
+                egui::CollapsingHeader::new("Reveal recovery words")
+                    .default_open(false)
                     .show(ui, |ui| {
                         secret_card(ui, &secrets, &self.summary);
                         ui.add_space(8.0);
-                        if ui.button("Clear recovery material").clicked() {
+                        if ui.add(danger_button("Clear recovery material")).clicked() {
                             self.secrets = None;
                         }
                     });
@@ -1697,42 +1671,101 @@ impl WalletApp {
     }
 
     fn render_receive_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "2. Sync And Receive", "Connect this wallet to a Kaspa node, wait for sync, then generate receive addresses from the primary cosigner only.", TEAL, |ui| {
-            if ui.available_width() >= 960.0 {
-                ui.columns(2, |columns| {
-                    self.render_receive_controls(&mut columns[0]);
-                    self.render_receive_status_panel(&mut columns[1]);
-                });
-            } else {
+        section_card(
+            ui,
+            "Receive Funds",
+            "This page only handles receive addresses. Connection and sync status live in the separate Connect step.",
+            TEAL,
+            |ui| {
                 self.render_receive_controls(ui);
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(12.0);
-                self.render_receive_status_panel(ui);
-            }
-        });
+
+                if let Some(balance) = &self.balance {
+                    ui.add_space(12.0);
+                    metric_line(ui, "Available", format!("{} KAS", balance.available_kas));
+                    metric_line(ui, "Pending", format!("{} KAS", balance.pending_kas));
+                }
+
+                if self.wallet_ready() {
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add(secondary_button("Refresh balances")).clicked() {
+                            self.request_balance();
+                        }
+                        if ui.add(secondary_button("Load address history")).clicked() {
+                            self.request_addresses();
+                        }
+                    });
+                }
+
+                if !self.addresses.is_empty() {
+                    ui.add_space(10.0);
+                    egui::CollapsingHeader::new("Address history")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            for address in self.addresses.iter().take(12) {
+                                mono_line(ui, address);
+                            }
+                        });
+                }
+            },
+        );
     }
 
     fn render_spend_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "3. Send Funds", "Create an unsigned bundle, collect the required signatures, review the result, and broadcast only when the bundle is fully signed.", OLIVE, |ui| {
-            if ui.available_width() >= 1040.0 {
-                ui.columns(2, |columns| {
-                    self.render_spend_controls(&mut columns[0]);
-                    self.render_spend_status_panel(&mut columns[1]);
-                });
-            } else {
-                self.render_spend_controls(ui);
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(12.0);
-                self.render_spend_status_panel(ui);
-            }
+        section_card(
+            ui,
+            "Send Funds",
+            "Prepare the payment first. Review, signatures, and final send actions only appear after a real transaction draft exists.",
+            OLIVE,
+            |ui| {
+                if self.flow_bundle.is_some() {
+                    supporting_text(
+                        ui,
+                        "A payment draft already exists. Finish review and signatures here, or clear it to start a different payment.",
+                    );
+                    ui.add_space(16.0);
+                    self.render_spend_status_panel(ui);
+                    ui.add_space(12.0);
+                    if ui.add(secondary_button("Start a new payment")).clicked() {
+                        self.flow_hex.clear();
+                        self.flow_bundle = None;
+                        self.last_broadcast_tx_ids.clear();
+                    }
+                    ui.add_space(12.0);
+                    supporting_text(
+                        ui,
+                        "Need raw bundle hex or a deeper inspection? Open the Technical page from the status rail.",
+                    );
+                    if ui
+                        .add(secondary_button("Open technical details"))
+                        .clicked()
+                    {
+                        self.active_page = WorkspacePage::Technical;
+                    }
+                } else {
+                    self.render_spend_controls(ui);
+                }
 
-            ui.add_space(12.0);
-            egui::CollapsingHeader::new("Advanced bundle details")
-                .default_open(self.flow_bundle.is_some())
-                .show(ui, |ui| {
-                    ui.label(RichText::new("Raw bundle hex").strong());
+                if !self.last_broadcast_tx_ids.is_empty() {
+                    ui.add_space(14.0);
+                    ui.label(RichText::new("Last broadcast txids").strong());
+                    for txid in &self.last_broadcast_tx_ids {
+                        mono_line(ui, txid);
+                    }
+                }
+            },
+        );
+    }
+
+    fn render_inspector_section(&mut self, ui: &mut Ui) {
+        section_card(
+            ui,
+            "Technical Details",
+            "Use this page for raw bundle hex, offline parsing, and deeper transaction inspection outside the normal receive and send flow.",
+            COPPER,
+            |ui| {
+                if !self.flow_hex.trim().is_empty() {
+                    ui.label(RichText::new("Current payment bundle").strong());
                     ui.add(
                         TextEdit::multiline(&mut self.flow_hex)
                             .desired_rows(8)
@@ -1740,52 +1773,56 @@ impl WalletApp {
                             .hint_text("Unsigned, partially signed, or fully signed bundle hex."),
                     );
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Copy bundle hex").clicked() {
+                        if ui.add(secondary_button("Copy bundle hex")).clicked() {
                             copy_text(ui, self.flow_hex.clone());
                         }
-                        if ui.button("Use in advanced review").clicked() {
+                        if ui.add(secondary_button("Use in inspector")).clicked() {
                             self.inspector.transactions_hex = self.flow_hex.clone();
                         }
-                        if ui.button("Clear bundle").clicked() {
+                        if ui.add(danger_button("Clear current bundle")).clicked() {
                             self.flow_hex.clear();
                             self.flow_bundle = None;
                             self.last_broadcast_tx_ids.clear();
                         }
                     });
+
+                    if let Some(bundle) = &self.flow_bundle {
+                        ui.add_space(10.0);
+                        egui::CollapsingHeader::new("Bundle breakdown")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                render_transaction_bundle(ui, bundle);
+                            });
+                    }
+
+                    ui.add_space(16.0);
+                }
+
+                ui.label(RichText::new("Inspector").strong());
+                ui.add(
+                    TextEdit::multiline(&mut self.inspector.transactions_hex)
+                        .desired_rows(8)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("Paste any bundle hex here for offline review."),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add(primary_button("Parse inspector hex")).clicked() {
+                        self.request_parse_inspector();
+                    }
+                    if ui.add(secondary_button("Use current bundle")).clicked() {
+                        self.inspector.transactions_hex = self.flow_hex.clone();
+                    }
+                    if ui.add(secondary_button("Copy inspector hex")).clicked() {
+                        copy_text(ui, self.inspector.transactions_hex.clone());
+                    }
                 });
 
-            if let Some(bundle) = &self.flow_bundle {
-                ui.add_space(14.0);
-                render_transaction_bundle(ui, bundle);
-            }
-        });
-    }
-
-    fn render_inspector_section(&mut self, ui: &mut Ui) {
-        section_card(ui, "4. Advanced Review", "Review any transaction bundle offline. Use this for audit trails, signature coordination, and final broadcast checks.", OLIVE, |ui| {
-            ui.add(
-                TextEdit::multiline(&mut self.inspector.transactions_hex)
-                    .desired_rows(8)
-                    .font(egui::TextStyle::Monospace)
-                    .hint_text("Paste any bundle hex here for offline review."),
-            );
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Parse inspector hex").clicked() {
-                    self.request_parse_inspector();
+                if let Some(bundle) = &self.inspector_bundle {
+                    ui.add_space(14.0);
+                    render_transaction_bundle(ui, bundle);
                 }
-                if ui.button("Use current bundle").clicked() {
-                    self.inspector.transactions_hex = self.flow_hex.clone();
-                }
-                if ui.button("Copy inspector hex").clicked() {
-                    copy_text(ui, self.inspector.transactions_hex.clone());
-                }
-            });
-
-            if let Some(bundle) = &self.inspector_bundle {
-                ui.add_space(14.0);
-                render_transaction_bundle(ui, bundle);
-            }
-        });
+            },
+        );
     }
 }
 
@@ -1793,13 +1830,14 @@ impl eframe::App for WalletApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events();
         self.auto_poll();
+        self.sync_active_page();
         ctx.request_repaint_after(Duration::from_millis(250));
 
         egui::TopBottomPanel::top("top_bar")
             .frame(
                 Frame::none()
                     .fill(SAND)
-                    .inner_margin(egui::Margin::same(18.0)),
+                    .inner_margin(egui::Margin::same(16.0)),
             )
             .show(ctx, |ui| {
                 self.render_top_bar(ui);
@@ -1810,8 +1848,8 @@ impl eframe::App for WalletApp {
             });
 
         egui::SidePanel::left("sidebar")
-            .resizable(true)
-            .default_width(290.0)
+            .resizable(false)
+            .exact_width(268.0)
             .frame(
                 Frame::none()
                     .fill(SAND)
@@ -1830,16 +1868,12 @@ impl eframe::App for WalletApp {
                     .inner_margin(egui::Margin::same(16.0)),
             )
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.render_overview_section(ui);
-                    ui.add_space(12.0);
-                    self.render_bootstrap_section(ui);
-                    ui.add_space(12.0);
-                    self.render_receive_section(ui);
-                    ui.add_space(12.0);
-                    self.render_spend_section(ui);
-                    ui.add_space(12.0);
-                    self.render_inspector_section(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| match self.active_page {
+                    WorkspacePage::Setup => self.render_bootstrap_section(ui),
+                    WorkspacePage::Connect => self.render_connect_section(ui),
+                    WorkspacePage::Receive => self.render_receive_section(ui),
+                    WorkspacePage::Send => self.render_spend_section(ui),
+                    WorkspacePage::Technical => self.render_inspector_section(ui),
                 });
             });
     }
@@ -1854,113 +1888,97 @@ fn section_card<R>(
 ) -> R {
     Frame::none()
         .fill(CREAM)
-        .inner_margin(egui::Margin::same(18.0))
-        .rounding(egui::Rounding::same(18.0))
-        .stroke(Stroke::new(1.0, STROKE))
+        .inner_margin(egui::Margin::same(16.0))
+        .rounding(egui::Rounding::same(16.0))
+        .stroke(Stroke::new(1.0, STROKE.gamma_multiply(0.6)))
         .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(title)
-                        .text_style(egui::TextStyle::Name("Section".into()))
-                        .color(INK),
-                );
-                status_chip(ui, "multisig", accent);
-            });
-            ui.add_space(4.0);
+            ui.label(
+                RichText::new(title.to_ascii_uppercase())
+                    .small()
+                    .strong()
+                    .color(accent),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(title)
+                    .text_style(egui::TextStyle::Name("Section".into()))
+                    .color(INK),
+            );
+            ui.add_space(2.0);
             supporting_text(ui, subtitle);
-            ui.add_space(14.0);
+            ui.add_space(12.0);
             add_contents(ui)
         })
         .inner
 }
 
 fn render_sidebar_brand(ui: &mut Ui, logo_texture: Option<&egui::TextureHandle>) {
-    Frame::none()
-        .fill(Color32::from_rgb(238, 247, 245))
-        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
-        .rounding(egui::Rounding::same(16.0))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(170, 210, 203)))
-        .show(ui, |ui| {
-            if let Some(texture) = logo_texture {
-                ui.centered_and_justified(|ui| {
-                    ui.add(
-                        egui::Image::new(texture)
-                            .fit_to_exact_size(egui::vec2(196.0, 62.0))
-                            .maintain_aspect_ratio(true),
-                    );
-                });
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(
-                        RichText::new("IGRA LABS")
-                            .strong()
-                            .color(Color32::from_rgb(9, 35, 37))
-                            .text_style(egui::TextStyle::Name("Section".into())),
-                    );
-                });
-            }
-        });
+    if let Some(texture) = logo_texture {
+        ui.add(
+            egui::Image::new(texture)
+                .fit_to_exact_size(egui::vec2(138.0, 42.0))
+                .maintain_aspect_ratio(true),
+        );
+    } else {
+        ui.label(RichText::new("IGRA LABS").strong().color(INK));
+    }
 }
 
 fn highlight_strip(ui: &mut Ui, label: &str, value: &str, accent: Color32) {
     Frame::none()
         .fill(PANEL_SOFT)
-        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
-        .rounding(egui::Rounding::same(14.0))
-        .stroke(Stroke::new(1.0, accent))
+        .inner_margin(egui::Margin::same(12.0))
+        .rounding(egui::Rounding::same(12.0))
+        .stroke(Stroke::new(1.0, STROKE.gamma_multiply(0.45)))
         .show(ui, |ui| {
-            ui.label(RichText::new(label).small().color(TEXT_SOFT));
+            ui.label(
+                RichText::new(label.to_ascii_uppercase())
+                    .small()
+                    .strong()
+                    .color(accent),
+            );
+            ui.add_space(4.0);
             wrapped_text(ui, value, INK);
         });
 }
 
-fn journey_step_card(ui: &mut Ui, title: &str, description: &str, complete: bool, active: bool) {
-    let accent = if complete {
-        OLIVE
-    } else if active {
-        COPPER
-    } else {
-        TEXT_SOFT
-    };
-    let state = if complete {
-        "done"
-    } else if active {
-        "next"
-    } else {
-        "later"
-    };
-
-    Frame::none()
-        .fill(PANEL_ALT)
-        .inner_margin(egui::Margin::same(12.0))
-        .rounding(egui::Rounding::same(14.0))
-        .stroke(Stroke::new(1.0, accent))
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(title).strong().color(INK));
-                status_chip(ui, state, accent);
-            });
-            supporting_text(ui, description);
-        });
-}
-
-fn side_card<R>(
+fn workspace_nav_item(
     ui: &mut Ui,
-    title: &str,
-    fill: Color32,
-    add_contents: impl FnOnce(&mut Ui) -> R,
-) -> R {
-    Frame::none()
+    page: WorkspacePage,
+    active: bool,
+    unlocked: bool,
+    recommended: bool,
+) -> bool {
+    let fill = if active {
+        PANEL_SOFT.gamma_multiply(0.7)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let title_color = if unlocked { INK } else { TEXT_SOFT };
+
+    let response = Frame::none()
         .fill(fill)
-        .inner_margin(egui::Margin::same(14.0))
-        .rounding(egui::Rounding::same(16.0))
-        .stroke(Stroke::new(1.0, STROKE))
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .rounding(egui::Rounding::same(10.0))
         .show(ui, |ui| {
-            ui.label(RichText::new(title).strong().color(INK));
-            ui.add_space(8.0);
-            add_contents(ui)
+            ui.add_enabled_ui(unlocked, |ui| {
+                ui.horizontal(|ui| {
+                    let marker = if active {
+                        COPPER
+                    } else if recommended {
+                        TEAL.gamma_multiply(0.75)
+                    } else {
+                        STROKE.gamma_multiply(0.45)
+                    };
+                    ui.colored_label(marker, "●");
+                    ui.label(RichText::new(page.label()).strong().color(title_color));
+                });
+            });
         })
-        .inner
+        .response
+        .interact(egui::Sense::click());
+
+    unlocked && response.clicked()
 }
 
 fn secret_card(ui: &mut Ui, secrets: &ExportSecretsResponse, summary: &Option<WalletSummary>) {
@@ -2097,8 +2115,8 @@ fn render_transaction_bundle(ui: &mut Ui, bundle: &TransactionBundle) {
 
 fn banner_line(ui: &mut Ui, banner: &BannerMessage) {
     let (fill, text) = match banner.tone {
-        MessageTone::Info => (PANEL_SOFT, TEAL),
-        MessageTone::Error => (Color32::from_rgb(49, 18, 27), WARM_RED),
+        MessageTone::Info => (PANEL_ALT, TEAL),
+        MessageTone::Error => (Color32::from_rgb(41, 18, 23), WARM_RED),
     };
     Frame::none()
         .fill(fill)
@@ -2113,12 +2131,33 @@ fn banner_line(ui: &mut Ui, banner: &BannerMessage) {
 fn status_chip(ui: &mut Ui, label: impl AsRef<str>, color: Color32) {
     Frame::none()
         .fill(color.gamma_multiply(0.12))
-        .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
         .rounding(egui::Rounding::same(999.0))
-        .stroke(Stroke::new(1.0, color))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.75)))
         .show(ui, |ui| {
             ui.label(RichText::new(label.as_ref()).color(color).small().strong());
         });
+}
+
+fn primary_button(label: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(label.into()).strong().color(SAND))
+        .fill(TEAL)
+        .stroke(Stroke::new(1.0, TEAL))
+        .rounding(egui::Rounding::same(12.0))
+}
+
+fn secondary_button(label: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(label.into()).strong().color(INK))
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::NONE)
+        .rounding(egui::Rounding::same(12.0))
+}
+
+fn danger_button(label: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(label.into()).strong().color(WARM_RED))
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, WARM_RED))
+        .rounding(egui::Rounding::same(12.0))
 }
 
 fn metric_line(ui: &mut Ui, label: &str, value: String) {
@@ -2136,7 +2175,6 @@ fn mono_line(ui: &mut Ui, value: &str) {
         .fill(PANEL_ALT)
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .rounding(egui::Rounding::same(10.0))
-        .stroke(Stroke::new(1.0, STROKE))
         .show(ui, |ui| {
             ui.add_sized(
                 [ui.available_width(), 0.0],
@@ -2146,12 +2184,12 @@ fn mono_line(ui: &mut Ui, value: &str) {
 }
 
 fn field(ui: &mut Ui, label: &str, value: &mut String) {
-    ui.label(RichText::new(label).strong());
+    ui.label(RichText::new(label).small().strong().color(TEXT_SOFT));
     ui.add(TextEdit::singleline(value).desired_width(f32::INFINITY));
 }
 
 fn password_field(ui: &mut Ui, label: &str, value: &mut String) {
-    ui.label(RichText::new(label).strong());
+    ui.label(RichText::new(label).small().strong().color(TEXT_SOFT));
     ui.add(
         TextEdit::singleline(value)
             .password(true)
@@ -2161,7 +2199,7 @@ fn password_field(ui: &mut Ui, label: &str, value: &mut String) {
 
 fn numeric_drag(ui: &mut Ui, label: &str, value: &mut u32, range: std::ops::RangeInclusive<u32>) {
     ui.vertical(|ui| {
-        ui.label(RichText::new(label).strong());
+        ui.label(RichText::new(label).small().strong().color(TEXT_SOFT));
         ui.add(egui::DragValue::new(value).range(range));
     });
 }
