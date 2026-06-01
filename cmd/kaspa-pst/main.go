@@ -346,13 +346,13 @@ func inspectBundle(bundleHex, network string, federationXpubs []string, threshol
 
 func paramsFromNetwork(network string) (*dagconfig.Params, error) {
 	switch strings.ToLower(network) {
-	case "", dagconfig.MainnetParams.Name:
+	case "", "mainnet", dagconfig.MainnetParams.Name:
 		return &dagconfig.MainnetParams, nil
-	case dagconfig.TestnetParams.Name:
+	case "testnet", dagconfig.TestnetParams.Name:
 		return &dagconfig.TestnetParams, nil
-	case dagconfig.DevnetParams.Name:
+	case "devnet", dagconfig.DevnetParams.Name:
 		return &dagconfig.DevnetParams, nil
-	case dagconfig.SimnetParams.Name:
+	case "simnet", dagconfig.SimnetParams.Name:
 		return &dagconfig.SimnetParams, nil
 	default:
 		return nil, errors.Errorf("unknown network %q", network)
