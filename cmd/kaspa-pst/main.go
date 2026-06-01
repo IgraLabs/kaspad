@@ -226,9 +226,6 @@ func runBroadcast(reader io.Reader) (*broadcastResponse, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := validateExtractedTransactionScripts(tx); err != nil {
-			return nil, err
-		}
 		txID := consensushashing.TransactionID(tx).String()
 		response, err := client.SubmitTransaction(appmessage.DomainTransactionToRPCTransaction(tx), txID, false)
 		if err != nil {
@@ -332,11 +329,7 @@ func inspectBundle(bundleHex, network string, federationXpubs []string, threshol
 	response.Ready = isBundleReady(transactions, ecdsa)
 	if response.Ready {
 		for _, transaction := range transactions {
-			tx, err := libkaspawallet.ExtractTransaction(transaction, ecdsa)
-			if err != nil {
-				return nil, err
-			}
-			if err := validateExtractedTransactionScripts(tx); err != nil {
+			if _, err := libkaspawallet.ExtractTransaction(transaction, ecdsa); err != nil {
 				return nil, err
 			}
 		}
@@ -476,23 +469,6 @@ func ensureSamePartiallySignedInput(current, signed *serialization.PartiallySign
 	for i := range current.PubKeySignaturePairs {
 		if current.PubKeySignaturePairs[i].ExtendedPublicKey != signed.PubKeySignaturePairs[i].ExtendedPublicKey {
 			return errors.Errorf("pubkey slot %d changed", i)
-		}
-	}
-	return nil
-}
-
-func validateExtractedTransactionScripts(tx *externalapi.DomainTransaction) error {
-	sighashReusedValues := &consensushashing.SighashReusedValues{}
-	for i, input := range tx.Inputs {
-		if input.UTXOEntry == nil {
-			return errors.Errorf("input %d is missing UTXO entry", i)
-		}
-		vm, err := txscript.NewEngine(input.UTXOEntry.ScriptPublicKey(), tx, i, txscript.ScriptNoFlags, nil, nil, sighashReusedValues)
-		if err != nil {
-			return err
-		}
-		if err := vm.Execute(); err != nil {
-			return err
 		}
 	}
 	return nil
