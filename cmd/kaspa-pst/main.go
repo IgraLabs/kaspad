@@ -402,6 +402,10 @@ func mergePartiallySignedTransaction(txIndex int, current, signed *serialization
 		if err := ensureSamePartiallySignedInput(currentInput, signedInput); err != nil {
 			return nil, errors.Wrapf(err, "transaction %d input %d changed", txIndex, inputIndex)
 		}
+		if len(currentInput.PubKeySignaturePairs) > 255 {
+			return nil, errors.Errorf("transaction %d input %d has too many pubkey slots", txIndex, inputIndex)
+		}
+		current.Tx.Inputs[inputIndex].SigOpCount = byte(len(currentInput.PubKeySignaturePairs))
 		for slot, signedPair := range signedInput.PubKeySignaturePairs {
 			currentPair := currentInput.PubKeySignaturePairs[slot]
 			if len(signedPair.Signature) == 0 {
