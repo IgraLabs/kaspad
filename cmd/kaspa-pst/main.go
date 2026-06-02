@@ -50,6 +50,17 @@ type broadcastRequest struct {
 	ECDSA           bool     `json:"ecdsa"`
 }
 
+type utxosRequest struct {
+	Network             string `json:"network"`
+	RPCURL              string `json:"rpcUrl"`
+	Address             string `json:"address"`
+	ScriptPublicKey     string `json:"scriptPublicKey"`
+	CoinbaseMaturityDAA uint64 `json:"coinbaseMaturityDaa"`
+	MinConfirmationsDAA uint64 `json:"minConfirmationsDaa"`
+	MinAmountSompi      uint64 `json:"minAmountSompi"`
+	MaxInputs           uint32 `json:"maxInputs"`
+}
+
 type inspectResponse struct {
 	ProposalHash        string       `json:"proposalHash"`
 	XpubFingerprint     string       `json:"xpubFingerprint,omitempty"`
@@ -70,6 +81,43 @@ type mergeResponse struct {
 
 type broadcastResponse struct {
 	TxIDs []string `json:"txIds"`
+}
+
+type utxosResponse struct {
+	Source              string            `json:"source"`
+	Network             string            `json:"network"`
+	Address             string            `json:"address"`
+	RPCURL              string            `json:"rpcUrl"`
+	ScriptPublicKey     string            `json:"scriptPublicKey,omitempty"`
+	VirtualDAAScore     uint64            `json:"virtualDaaScore"`
+	CoinbaseMaturityDAA uint64            `json:"coinbaseMaturityDaa"`
+	MinConfirmationsDAA uint64            `json:"minConfirmationsDaa"`
+	MinAmountSompi      uint64            `json:"minAmountSompi"`
+	MaxInputs           uint32            `json:"maxInputs"`
+	Entries             []utxoReportEntry `json:"entries"`
+}
+
+type utxoReportEntry struct {
+	Address   string              `json:"address"`
+	Outpoint  utxoReportOutpoint  `json:"outpoint"`
+	UTXOEntry utxoReportUTXOEntry `json:"utxoEntry"`
+}
+
+type utxoReportOutpoint struct {
+	TransactionID string `json:"transactionId"`
+	Index         uint32 `json:"index"`
+}
+
+type utxoReportUTXOEntry struct {
+	Amount          uint64                    `json:"amount"`
+	BlockDAAScore   uint64                    `json:"blockDaaScore"`
+	IsCoinbase      bool                      `json:"isCoinbase"`
+	ScriptPublicKey utxoReportScriptPublicKey `json:"scriptPublicKey"`
+}
+
+type utxoReportScriptPublicKey struct {
+	Version uint16 `json:"version"`
+	Script  string `json:"script"`
 }
 
 type inputInfo struct {
@@ -103,7 +151,7 @@ type signatureInfo struct {
 
 func main() {
 	if len(os.Args) != 2 {
-		exitWithError(errors.New("usage: kaspa-pst inspect|merge|broadcast"))
+		exitWithError(errors.New("usage: kaspa-pst inspect|merge|broadcast|utxos"))
 	}
 
 	var result any
@@ -115,6 +163,8 @@ func main() {
 		result, err = runMerge(os.Stdin)
 	case "broadcast":
 		result, err = runBroadcast(os.Stdin)
+	case "utxos":
+		result, err = runUTXOs(os.Stdin)
 	default:
 		err = errors.Errorf("unknown command %q", os.Args[1])
 	}
@@ -234,6 +284,77 @@ func runBroadcast(reader io.Reader) (*broadcastResponse, error) {
 		txIDs[i] = response.TransactionID
 	}
 	return &broadcastResponse{TxIDs: txIDs}, nil
+}
+
+func runUTXOs(reader io.Reader) (*utxosResponse, error) {
+	var request utxosRequest
+	if err := decodeRequest(reader, &request); err != nil {
+		return nil, err
+	}
+	if request.RPCURL == "" {
+		return nil, errors.New("rpcUrl is required")
+	}
+	if request.Address == "" {
+		return nil, errors.New("address is required")
+	}
+	if request.MaxInputs == 0 {
+		request.MaxInputs = 64
+	}
+	if request.CoinbaseMaturityDAA == 0 {
+		request.CoinbaseMaturityDAA = 1000
+	}
+
+	client, err := rpcclient.NewRPCClient(request.RPCURL)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+
+	info, err := client.GetBlockDAGInfo()
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.GetUTXOsByAddresses([]string{request.Address})
+	if err != nil {
+		return nil, err
+	}
+
+	entries := make([]utxoReportEntry, 0, len(response.Entries))
+	for _, entry := range response.Entries {
+		if entry.Address != request.Address || entry.Outpoint == nil || entry.UTXOEntry == nil || entry.UTXOEntry.ScriptPublicKey == nil {
+			continue
+		}
+		entries = append(entries, utxoReportEntry{
+			Address: entry.Address,
+			Outpoint: utxoReportOutpoint{
+				TransactionID: entry.Outpoint.TransactionID,
+				Index:         entry.Outpoint.Index,
+			},
+			UTXOEntry: utxoReportUTXOEntry{
+				Amount:        entry.UTXOEntry.Amount,
+				BlockDAAScore: entry.UTXOEntry.BlockDAAScore,
+				IsCoinbase:    entry.UTXOEntry.IsCoinbase,
+				ScriptPublicKey: utxoReportScriptPublicKey{
+					Version: entry.UTXOEntry.ScriptPublicKey.Version,
+					Script:  strings.ToLower(entry.UTXOEntry.ScriptPublicKey.Script),
+				},
+			},
+		})
+	}
+
+	return &utxosResponse{
+		Source:              "kaspa-node-rpc",
+		Network:             request.Network,
+		Address:             request.Address,
+		RPCURL:              request.RPCURL,
+		ScriptPublicKey:     strings.ToLower(strings.TrimPrefix(request.ScriptPublicKey, "0x")),
+		VirtualDAAScore:     info.VirtualDAAScore,
+		CoinbaseMaturityDAA: request.CoinbaseMaturityDAA,
+		MinConfirmationsDAA: request.MinConfirmationsDAA,
+		MinAmountSompi:      request.MinAmountSompi,
+		MaxInputs:           request.MaxInputs,
+		Entries:             entries,
+	}, nil
 }
 
 func decodeRequest(reader io.Reader, value any) error {
