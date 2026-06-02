@@ -654,7 +654,7 @@ func verifyExitProposalWithOptions(opts exitProposalVerifyOptions) (*exitProposa
 	result.KaspaTxID = txID
 	addCheck("decoded PST matches manifest inputs, outputs, payload, fee, and tx id")
 
-	if err := rebuildAndComparePST(opts.NetParams, pst, bundleParts[0], manifest, expectedPayload); err != nil {
+	if err := rebuildAndComparePST(opts.NetParams, pst, bundleParts[0], manifest, expectedPayload, candidate, proposal); err != nil {
 		return nil, err
 	}
 	addCheck("locally rebuilt PST bytes exactly match the proposal")
@@ -1063,9 +1063,20 @@ func verifyKaspaPST(
 		if len(partialInput.PubKeySignaturePairs) != len(manifest.Multisig.ExtendedPublicKeys) {
 			return nil, errors.Errorf("partial input %d xpub slot count mismatch", i)
 		}
+		expectedDerivedXpubs, err := deriveExtendedPublicKeys(manifest.Multisig.ExtendedPublicKeys, manifestUTXO.DerivationPath)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to derive manifest xpubs for input %d", i)
+		}
 		for pairIndex, pair := range partialInput.PubKeySignaturePairs {
 			if len(pair.Signature) != 0 {
 				return nil, errors.Errorf("partial input %d xpub slot %d is already signed", i, pairIndex)
+			}
+			matches, err := sameExtendedPublicKey(pair.ExtendedPublicKey, expectedDerivedXpubs[pairIndex])
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed to compare xpub slot %d for input %d", pairIndex, i)
+			}
+			if !matches {
+				return nil, errors.Errorf("partial input %d xpub slot %d does not match manifest derivation", i, pairIndex)
 			}
 		}
 		if !scriptPublicKeysEqual(partialInput.PrevOutput.ScriptPublicKey, expectedPrevOutput.ScriptPublicKey) ||
@@ -1132,6 +1143,8 @@ func rebuildAndComparePST(
 	pstBytes []byte,
 	manifest unsignedExitManifest,
 	payload []byte,
+	candidate exitProposalCandidate,
+	proposal exitProposalAPI,
 ) error {
 	expectedPayments, err := expectedManifestPayments(manifest)
 	if err != nil {
@@ -1179,12 +1192,41 @@ func rebuildAndComparePST(
 		return errors.Wrap(err, "failed to serialize locally rebuilt PST")
 	}
 	if !bytes.Equal(rebuiltBytes, pstBytes) {
+		if candidateNormalizedRebuildMatches(candidate, manifest.Wallet.HexSha256, rebuiltBytes, proposal.UnsignedBundleHex) {
+			return nil
+		}
 		if consensushashing.TransactionID(rebuilt.Tx).String() == consensushashing.TransactionID(pst.Tx).String() {
 			return errors.New("rebuilt PST has the same transaction id but different serialized PST bytes")
 		}
 		return errors.New("rebuilt PST does not match proposed PST")
 	}
 	return nil
+}
+
+func candidateNormalizedRebuildMatches(candidate exitProposalCandidate, originalHexHash string, rebuiltBytes []byte, proposalUnsignedHex string) bool {
+	normalization := candidate.WalletHexNormalization
+	if len(normalization) == 0 {
+		return false
+	}
+	applied, ok := normalizationBool(normalization, "applied")
+	if !ok || !applied {
+		return false
+	}
+
+	rebuiltHex := hex.EncodeToString(rebuiltBytes)
+	rebuiltHexHash := sha256.Sum256([]byte(rebuiltHex))
+	rebuiltHexHashString := hex.EncodeToString(rebuiltHexHash[:])
+	expectedOriginalHash := normalizationString(normalization, "originalBundleHexSha256", "original_bundle_hex_sha256")
+	if expectedOriginalHash == "" {
+		expectedOriginalHash = originalHexHash
+	}
+	if strip0xLower(expectedOriginalHash) != rebuiltHexHashString {
+		return false
+	}
+
+	proposalHash := sha256.Sum256([]byte(strings.TrimSpace(proposalUnsignedHex)))
+	expectedNormalizedHash := normalizationString(normalization, "normalizedBundleHexSha256", "normalized_bundle_hex_sha256")
+	return strip0xLower(expectedNormalizedHash) == hex.EncodeToString(proposalHash[:])
 }
 
 func expectedManifestPayments(manifest unsignedExitManifest) ([]expectedPayment, error) {
@@ -1538,6 +1580,34 @@ func sameExtendedPublicKeys(left, right []string) (bool, error) {
 		return false, err
 	}
 	return sameSortedStrings(leftNormalized, rightNormalized), nil
+}
+
+func sameExtendedPublicKey(left, right string) (bool, error) {
+	leftIdentity, err := extendedPublicKeyIdentity(left)
+	if err != nil {
+		return false, err
+	}
+	rightIdentity, err := extendedPublicKeyIdentity(right)
+	if err != nil {
+		return false, err
+	}
+	return leftIdentity == rightIdentity, nil
+}
+
+func deriveExtendedPublicKeys(xpubs []string, path string) ([]string, error) {
+	derived := make([]string, len(xpubs))
+	for i, xpub := range xpubs {
+		extendedKey, err := bip32.DeserializeExtendedKey(xpub)
+		if err != nil {
+			return nil, err
+		}
+		derivedKey, err := extendedKey.DeriveFromPath(path)
+		if err != nil {
+			return nil, err
+		}
+		derived[i] = derivedKey.String()
+	}
+	return derived, nil
 }
 
 func normalizedExtendedPublicKeys(in []string) ([]string, error) {
