@@ -1192,7 +1192,7 @@ func rebuildAndComparePST(
 		return errors.Wrap(err, "failed to serialize locally rebuilt PST")
 	}
 	if !bytes.Equal(rebuiltBytes, pstBytes) {
-		if candidateNormalizedRebuildMatches(candidate, manifest.Wallet.HexSha256, rebuiltBytes, proposal.UnsignedBundleHex) {
+		if candidateNormalizedRebuildMatches(candidate, rebuilt, pst, pstBytes, proposal.UnsignedBundleHex) {
 			return nil
 		}
 		if consensushashing.TransactionID(rebuilt.Tx).String() == consensushashing.TransactionID(pst.Tx).String() {
@@ -1203,7 +1203,13 @@ func rebuildAndComparePST(
 	return nil
 }
 
-func candidateNormalizedRebuildMatches(candidate exitProposalCandidate, originalHexHash string, rebuiltBytes []byte, proposalUnsignedHex string) bool {
+func candidateNormalizedRebuildMatches(
+	candidate exitProposalCandidate,
+	rebuilt *walletserialization.PartiallySignedTransaction,
+	target *walletserialization.PartiallySignedTransaction,
+	targetBytes []byte,
+	proposalUnsignedHex string,
+) bool {
 	normalization := candidate.WalletHexNormalization
 	if len(normalization) == 0 {
 		return false
@@ -1213,20 +1219,48 @@ func candidateNormalizedRebuildMatches(candidate exitProposalCandidate, original
 		return false
 	}
 
-	rebuiltHex := hex.EncodeToString(rebuiltBytes)
-	rebuiltHexHash := sha256.Sum256([]byte(rebuiltHex))
-	rebuiltHexHashString := hex.EncodeToString(rebuiltHexHash[:])
-	expectedOriginalHash := normalizationString(normalization, "originalBundleHexSha256", "original_bundle_hex_sha256")
-	if expectedOriginalHash == "" {
-		expectedOriginalHash = originalHexHash
-	}
-	if strip0xLower(expectedOriginalHash) != rebuiltHexHashString {
+	proposalHash := sha256.Sum256([]byte(strings.TrimSpace(proposalUnsignedHex)))
+	expectedNormalizedHash := normalizationString(normalization, "normalizedBundleHexSha256", "normalized_bundle_hex_sha256")
+	if strip0xLower(expectedNormalizedHash) != hex.EncodeToString(proposalHash[:]) {
 		return false
 	}
 
-	proposalHash := sha256.Sum256([]byte(strings.TrimSpace(proposalUnsignedHex)))
-	expectedNormalizedHash := normalizationString(normalization, "normalizedBundleHexSha256", "normalized_bundle_hex_sha256")
-	return strip0xLower(expectedNormalizedHash) == hex.EncodeToString(proposalHash[:])
+	normalizedRebuiltBytes, err := normalizeRebuiltPSTXpubAliases(rebuilt, target)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(normalizedRebuiltBytes, targetBytes)
+}
+
+func normalizeRebuiltPSTXpubAliases(
+	rebuilt *walletserialization.PartiallySignedTransaction,
+	target *walletserialization.PartiallySignedTransaction,
+) ([]byte, error) {
+	if len(rebuilt.PartiallySignedInputs) != len(target.PartiallySignedInputs) {
+		return nil, errors.New("partial input count mismatch")
+	}
+	for inputIndex := range rebuilt.PartiallySignedInputs {
+		rebuiltInput := rebuilt.PartiallySignedInputs[inputIndex]
+		targetInput := target.PartiallySignedInputs[inputIndex]
+		if len(rebuiltInput.PubKeySignaturePairs) != len(targetInput.PubKeySignaturePairs) {
+			return nil, errors.New("xpub slot count mismatch")
+		}
+		for slotIndex := range rebuiltInput.PubKeySignaturePairs {
+			matches, err := sameExtendedPublicKey(
+				rebuiltInput.PubKeySignaturePairs[slotIndex].ExtendedPublicKey,
+				targetInput.PubKeySignaturePairs[slotIndex].ExtendedPublicKey,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if !matches {
+				return nil, errors.New("xpub slot identity mismatch")
+			}
+			rebuiltInput.PubKeySignaturePairs[slotIndex].ExtendedPublicKey =
+				targetInput.PubKeySignaturePairs[slotIndex].ExtendedPublicKey
+		}
+	}
+	return walletserialization.SerializePartiallySignedTransaction(rebuilt)
 }
 
 func expectedManifestPayments(manifest unsignedExitManifest) ([]expectedPayment, error) {
