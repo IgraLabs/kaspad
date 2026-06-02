@@ -280,6 +280,39 @@ func TestVerifyExitProposalWithGeneratedFixture(t *testing.T) {
 	}
 }
 
+func TestVerifyUnsignedManifestBasicsAcceptsNormalizedWalletHex(t *testing.T) {
+	unsignedBundleHex := "aabbcc"
+	unsignedHash := sha256.Sum256([]byte(unsignedBundleHex))
+	originalHash := sha256.Sum256([]byte("original-wallet-hex"))
+
+	manifest := unsignedExitManifest{
+		Schema:   "igra.exit.unsigned.v1",
+		Network:  "devnet",
+		FeeSompi: 100,
+	}
+	manifest.Protocol.PayloadHeader = "0x93"
+	manifest.Protocol.KaspaTxID = strings.Repeat("1", 64)
+	manifest.Wallet.HexSha256 = "0x" + hex.EncodeToString(originalHash[:])
+
+	verifyReport := unsignedVerifyReport{
+		OK:          true,
+		KaspaTxID:   manifest.Protocol.KaspaTxID,
+		FullySigned: false,
+	}
+	proposal := exitProposalAPI{UnsignedBundleHex: unsignedBundleHex}
+	candidate := exitProposalCandidate{
+		WalletHexNormalization: map[string]interface{}{
+			"applied":                   true,
+			"originalBundleHexSha256":   hex.EncodeToString(originalHash[:]),
+			"normalizedBundleHexSha256": hex.EncodeToString(unsignedHash[:]),
+		},
+	}
+
+	if err := verifyUnsignedManifestBasics(manifest, verifyReport, proposal, candidate); err != nil {
+		t.Fatalf("verifyUnsignedManifestBasics: %s", err)
+	}
+}
+
 func toHex(data []byte) string {
 	const alphabet = "0123456789abcdef"
 	out := make([]byte, len(data)*2)

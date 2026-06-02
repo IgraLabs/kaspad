@@ -628,7 +628,7 @@ func verifyExitProposalWithOptions(opts exitProposalVerifyOptions) (*exitProposa
 	}
 	addCheck("evidence exits match unsigned Kaspa transaction outputs")
 
-	if err := verifyUnsignedManifestBasics(manifest, verifyReport, proposal); err != nil {
+	if err := verifyUnsignedManifestBasics(manifest, verifyReport, proposal, candidate); err != nil {
 		return nil, err
 	}
 	addCheck("unsigned manifest and Foundry verify report are consistent")
@@ -941,6 +941,7 @@ func verifyUnsignedManifestBasics(
 	manifest unsignedExitManifest,
 	verifyReport unsignedVerifyReport,
 	proposal exitProposalAPI,
+	candidate exitProposalCandidate,
 ) error {
 	if manifest.Schema != "igra.exit.unsigned.v1" {
 		return errors.Errorf("unsupported unsigned manifest schema %q", manifest.Schema)
@@ -977,10 +978,30 @@ func verifyUnsignedManifestBasics(
 		return errors.New("manifest wallet output count does not match exits plus change")
 	}
 	unsignedHexHash := sha256.Sum256([]byte(strings.TrimSpace(proposal.UnsignedBundleHex)))
-	if manifest.Wallet.HexSha256 != "" && strip0xLower(manifest.Wallet.HexSha256) != hex.EncodeToString(unsignedHexHash[:]) {
-		return errors.New("manifest wallet.hex_sha256 does not match proposal unsigned bundle hex")
+	unsignedHexHashString := hex.EncodeToString(unsignedHexHash[:])
+	if manifest.Wallet.HexSha256 != "" && strip0xLower(manifest.Wallet.HexSha256) != unsignedHexHashString {
+		if !candidateNormalizedBundleHashMatches(candidate, manifest.Wallet.HexSha256, unsignedHexHashString) {
+			return errors.New("manifest wallet.hex_sha256 does not match proposal unsigned bundle hex")
+		}
 	}
 	return nil
+}
+
+func candidateNormalizedBundleHashMatches(candidate exitProposalCandidate, originalHexHash, proposalHexHash string) bool {
+	normalization := candidate.WalletHexNormalization
+	if len(normalization) == 0 {
+		return false
+	}
+	applied, ok := normalizationBool(normalization, "applied")
+	if !ok || !applied {
+		return false
+	}
+	normalizedHash := normalizationString(normalization, "normalizedBundleHexSha256", "normalized_bundle_hex_sha256")
+	if strip0xLower(normalizedHash) != proposalHexHash {
+		return false
+	}
+	originalHash := normalizationString(normalization, "originalBundleHexSha256", "original_bundle_hex_sha256")
+	return originalHash == "" || strip0xLower(originalHash) == strip0xLower(originalHexHash)
 }
 
 func verifyKaspaPST(
@@ -1465,6 +1486,28 @@ func decodeHexField(value string) ([]byte, error) {
 func strip0xLower(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
 	return strings.TrimPrefix(value, "0x")
+}
+
+func normalizationString(normalization map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		value, ok := normalization[key]
+		if !ok {
+			continue
+		}
+		if typed, ok := value.(string); ok {
+			return typed
+		}
+	}
+	return ""
+}
+
+func normalizationBool(normalization map[string]interface{}, key string) (bool, bool) {
+	value, ok := normalization[key]
+	if !ok {
+		return false, false
+	}
+	typed, ok := value.(bool)
+	return typed, ok
 }
 
 func sameHex(left, right string) bool {
