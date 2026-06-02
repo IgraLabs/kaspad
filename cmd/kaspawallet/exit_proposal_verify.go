@@ -20,6 +20,7 @@ import (
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/daemon/server"
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/keys"
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/libkaspawallet"
+	"github.com/kaspanet/kaspad/cmd/kaspawallet/libkaspawallet/bip32"
 	walletserialization "github.com/kaspanet/kaspad/cmd/kaspawallet/libkaspawallet/serialization"
 	"github.com/kaspanet/kaspad/domain/consensus/model/externalapi"
 	"github.com/kaspanet/kaspad/domain/consensus/utils/consensushashing"
@@ -646,10 +647,18 @@ func verifyExitProposalKeys(
 	if evidence.Bridge.ECDSA != keysFile.ECDSA || manifest.Multisig.ECDSA != keysFile.ECDSA {
 		return errors.New("proposal ECDSA flag does not match local keys")
 	}
-	if !sameSortedStrings(evidence.Bridge.Xpubs, keysFile.ExtendedPublicKeys) {
+	evidenceKeysMatch, err := sameExtendedPublicKeys(evidence.Bridge.Xpubs, keysFile.ExtendedPublicKeys)
+	if err != nil {
+		return errors.Wrap(err, "failed to compare evidence xpubs")
+	}
+	if !evidenceKeysMatch {
 		return errors.New("evidence xpubs do not match local keys file")
 	}
-	if !sameSortedStrings(manifest.Multisig.ExtendedPublicKeys, keysFile.ExtendedPublicKeys) {
+	manifestKeysMatch, err := sameExtendedPublicKeys(manifest.Multisig.ExtendedPublicKeys, keysFile.ExtendedPublicKeys)
+	if err != nil {
+		return errors.Wrap(err, "failed to compare manifest xpubs")
+	}
+	if !manifestKeysMatch {
 		return errors.New("manifest xpubs do not match local keys file")
 	}
 	sortedXpubs := sortedStrings(keysFile.ExtendedPublicKeys)
@@ -1278,6 +1287,55 @@ func sameSortedStrings(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func sameExtendedPublicKeys(left, right []string) (bool, error) {
+	leftNormalized, err := normalizedExtendedPublicKeys(left)
+	if err != nil {
+		return false, err
+	}
+	rightNormalized, err := normalizedExtendedPublicKeys(right)
+	if err != nil {
+		return false, err
+	}
+	return sameSortedStrings(leftNormalized, rightNormalized), nil
+}
+
+func normalizedExtendedPublicKeys(in []string) ([]string, error) {
+	out := make([]string, len(in))
+	for i, key := range in {
+		identity, err := extendedPublicKeyIdentity(key)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = identity
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func extendedPublicKeyIdentity(key string) (string, error) {
+	extendedKey, err := bip32.DeserializeExtendedKey(key)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to decode extended public key")
+	}
+	publicKey, err := extendedKey.PublicKey()
+	if err != nil {
+		return "", err
+	}
+	serializedPublicKey, err := publicKey.Serialize()
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf(
+		"depth=%d,parent=%x,child=%d,chain=%x,pub=%x",
+		extendedKey.Depth,
+		extendedKey.ParentFingerprint,
+		extendedKey.ChildNumber,
+		extendedKey.ChainCode,
+		serializedPublicKey,
+	), nil
 }
 
 func sortedStrings(in []string) []string {

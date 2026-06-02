@@ -151,7 +151,8 @@ func findSafeServiceFederation(baseURL string, keysFile *keys.File, network stri
 		if federation.XpubFingerprint != "" && federation.XpubFingerprint == fingerprint {
 			return federation, nil
 		}
-		if sameSortedStrings(federation.Xpubs, keysFile.ExtendedPublicKeys) {
+		keysMatch, err := sameExtendedPublicKeys(federation.Xpubs, keysFile.ExtendedPublicKeys)
+		if err == nil && keysMatch {
 			return federation, nil
 		}
 	}

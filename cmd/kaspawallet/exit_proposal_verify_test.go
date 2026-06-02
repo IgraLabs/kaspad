@@ -32,6 +32,30 @@ func TestCanonicalJSONHashBytesMatchesSafeServiceEncoding(t *testing.T) {
 	}
 }
 
+func TestSameExtendedPublicKeysIgnoresKaspaNetworkVersion(t *testing.T) {
+	kdubKeys := []string{
+		"kdub56gU1zcmkvaiJ99h6wJV2XpXfzHWZBwdEi5HYohpknix1iJZ1t23Howq83bHpNTLZw9PSxscb7rU7RqKnGNbKu1ufzsyuCknmGQsh5V51CJ",
+		"kdub57DRL6WtuUhV5CHrYRt4Vmbo8GHL8EoT5TxPAMxHotiVUezLwwu84fA8JAa27vCWvsbiZSnFL7qt7HWTNRH4DCyjeodbEpGTg84cc8a1CG2",
+		"kdub57ge8DnE5vfLLYknHR1Gf2texR7ZBqu41UW5CRUrjmhEnq5Gmhw1SYaTCKcdnHqqrTY5n5MPTWTmNnNu1AbcVNQejYJ9agy7mDifyWf6U1Y",
+	}
+	kpubKeys := []string{
+		"kpub2J9bDYr2qN3973mivNnXA3NJcY3WbRNCcchWMiR1kk5nS6e25zBjhzk4wmeWfxqBGysdgyVCYgDTFZT9en73b9xjJsTxZEM7SrCg26fccmj",
+		"kpub2JgYXek9yv9ut6utMsN6dH9a4p3LAUE2TNabyGfUor5Ku3Kp244pUqxN7tdEyWaMdvKxoTPqHgCsFR8HEw1WUTvZHgDZtqrnMhrQw9Uj3vk",
+		"kpub2K9mKn1VAN7m9TNp6rVJnYSRtxsZE5KdPP8J1LC3jj45DDQjqp6hrjNh23frdtDgZWGL25xyR4pkWuzisgL4kdMUNQt8EiZSSoWUJT2ciQp",
+	}
+
+	if sameSortedStrings(kdubKeys, kpubKeys) {
+		t.Fatalf("test vectors should differ at string level")
+	}
+	same, err := sameExtendedPublicKeys(kdubKeys, kpubKeys)
+	if err != nil {
+		t.Fatalf("sameExtendedPublicKeys: %s", err)
+	}
+	if !same {
+		t.Fatalf("expected kpub/kdub key versions to match by BIP32 identity")
+	}
+}
+
 func TestBuildIgraExitPayload(t *testing.T) {
 	payload, err := buildIgraExitPayload(
 		[]manifestExit{
