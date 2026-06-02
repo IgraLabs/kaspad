@@ -246,47 +246,178 @@ type evidenceExit struct {
 }
 
 type unsignedExitManifest struct {
-	Schema   string `json:"schema"`
-	Network  string `json:"network"`
-	Protocol struct {
-		Version       uint32 `json:"version"`
-		TxTypeID      uint32 `json:"tx_type_id"`
-		PayloadHeader string `json:"payload_header"`
-		TxIDPrefix    string `json:"tx_id_prefix"`
-		Nonce         string `json:"nonce"`
-		KaspaTxID     string `json:"kaspa_tx_id"`
-		PayloadHex    string `json:"payload_hex"`
-	} `json:"protocol"`
-	LockingUTXOs     []manifestUTXO  `json:"locking_utxos"`
-	Exits            []manifestExit  `json:"exits"`
-	Change           *manifestChange `json:"change"`
-	FeeSompi         uint64          `json:"fee_sompi"`
-	TotalInputSompi  uint64          `json:"total_input_sompi"`
-	TotalOutputSompi uint64          `json:"total_output_sompi"`
-	Multisig         struct {
-		MinimumSignatures  uint32   `json:"minimum_signatures"`
-		ExtendedPublicKeys []string `json:"extended_public_keys"`
-		ECDSA              bool     `json:"ecdsa"`
-	} `json:"multisig"`
-	Wallet struct {
-		Format             string `json:"format"`
-		HexSha256          string `json:"hex_sha256"`
-		TransactionVersion uint16 `json:"transaction_version"`
-		Inputs             int    `json:"inputs"`
-		Outputs            int    `json:"outputs"`
-	} `json:"wallet"`
+	Schema           string           `json:"schema"`
+	Network          string           `json:"network"`
+	Protocol         manifestProtocol `json:"protocol"`
+	LockingUTXOs     []manifestUTXO   `json:"locking_utxos"`
+	Exits            []manifestExit   `json:"exits"`
+	Change           *manifestChange  `json:"change"`
+	FeeSompi         uint64           `json:"fee_sompi"`
+	TotalInputSompi  uint64           `json:"total_input_sompi"`
+	TotalOutputSompi uint64           `json:"total_output_sompi"`
+	Multisig         manifestMultisig `json:"multisig"`
+	Wallet           manifestWallet   `json:"wallet"`
+}
+
+func (manifest *unsignedExitManifest) UnmarshalJSON(data []byte) error {
+	type alias unsignedExitManifest
+	aux := struct {
+		*alias
+		LockingUTXOsCamel     []manifestUTXO `json:"lockingUtxos"`
+		FeeSompiCamel         uint64         `json:"feeSompi"`
+		TotalInputSompiCamel  uint64         `json:"totalInputSompi"`
+		TotalOutputSompiCamel uint64         `json:"totalOutputSompi"`
+	}{alias: (*alias)(manifest)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(manifest.LockingUTXOs) == 0 {
+		manifest.LockingUTXOs = aux.LockingUTXOsCamel
+	}
+	if manifest.FeeSompi == 0 {
+		manifest.FeeSompi = aux.FeeSompiCamel
+	}
+	if manifest.TotalInputSompi == 0 {
+		manifest.TotalInputSompi = aux.TotalInputSompiCamel
+	}
+	if manifest.TotalOutputSompi == 0 {
+		manifest.TotalOutputSompi = aux.TotalOutputSompiCamel
+	}
+	return nil
+}
+
+type manifestProtocol struct {
+	Version       uint32 `json:"version"`
+	TxTypeID      uint32 `json:"tx_type_id"`
+	PayloadHeader string `json:"payload_header"`
+	TxIDPrefix    string `json:"tx_id_prefix"`
+	Nonce         string `json:"nonce"`
+	KaspaTxID     string `json:"kaspa_tx_id"`
+	PayloadHex    string `json:"payload_hex"`
+}
+
+func (protocol *manifestProtocol) UnmarshalJSON(data []byte) error {
+	type alias manifestProtocol
+	aux := struct {
+		*alias
+		TxTypeIDCamel      uint32 `json:"txTypeId"`
+		PayloadHeaderCamel string `json:"payloadHeader"`
+		TxIDPrefixCamel    string `json:"txIdPrefix"`
+		KaspaTxIDCamel     string `json:"kaspaTxId"`
+		PayloadHexCamel    string `json:"payloadHex"`
+	}{alias: (*alias)(protocol)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if protocol.TxTypeID == 0 {
+		protocol.TxTypeID = aux.TxTypeIDCamel
+	}
+	if protocol.PayloadHeader == "" {
+		protocol.PayloadHeader = aux.PayloadHeaderCamel
+	}
+	if protocol.TxIDPrefix == "" {
+		protocol.TxIDPrefix = aux.TxIDPrefixCamel
+	}
+	if protocol.KaspaTxID == "" {
+		protocol.KaspaTxID = aux.KaspaTxIDCamel
+	}
+	if protocol.PayloadHex == "" {
+		protocol.PayloadHex = aux.PayloadHexCamel
+	}
+	return nil
+}
+
+type manifestMultisig struct {
+	MinimumSignatures  uint32   `json:"minimum_signatures"`
+	ExtendedPublicKeys []string `json:"extended_public_keys"`
+	ECDSA              bool     `json:"ecdsa"`
+}
+
+func (multisig *manifestMultisig) UnmarshalJSON(data []byte) error {
+	type alias manifestMultisig
+	aux := struct {
+		*alias
+		MinimumSignaturesCamel  uint32   `json:"minimumSignatures"`
+		ExtendedPublicKeysCamel []string `json:"extendedPublicKeys"`
+	}{alias: (*alias)(multisig)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if multisig.MinimumSignatures == 0 {
+		multisig.MinimumSignatures = aux.MinimumSignaturesCamel
+	}
+	if len(multisig.ExtendedPublicKeys) == 0 {
+		multisig.ExtendedPublicKeys = aux.ExtendedPublicKeysCamel
+	}
+	return nil
+}
+
+type manifestWallet struct {
+	Format             string `json:"format"`
+	HexSha256          string `json:"hex_sha256"`
+	TransactionVersion uint16 `json:"transaction_version"`
+	Inputs             int    `json:"inputs"`
+	Outputs            int    `json:"outputs"`
+}
+
+func (wallet *manifestWallet) UnmarshalJSON(data []byte) error {
+	type alias manifestWallet
+	aux := struct {
+		*alias
+		HexSha256Camel          string `json:"hexSha256"`
+		TransactionVersionCamel uint16 `json:"transactionVersion"`
+	}{alias: (*alias)(wallet)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if wallet.HexSha256 == "" {
+		wallet.HexSha256 = aux.HexSha256Camel
+	}
+	if wallet.TransactionVersion == 0 {
+		wallet.TransactionVersion = aux.TransactionVersionCamel
+	}
+	return nil
 }
 
 type manifestUTXO struct {
-	TransactionID   string `json:"transaction_id"`
-	Index           uint32 `json:"index"`
-	AmountSompi     uint64 `json:"amount_sompi"`
-	Address         string `json:"address"`
-	ScriptPublicKey struct {
-		Version uint16 `json:"version"`
-		Script  string `json:"script"`
-	} `json:"script_public_key"`
-	DerivationPath string `json:"derivation_path"`
+	TransactionID   string                  `json:"transaction_id"`
+	Index           uint32                  `json:"index"`
+	AmountSompi     uint64                  `json:"amount_sompi"`
+	Address         string                  `json:"address"`
+	ScriptPublicKey manifestScriptPublicKey `json:"script_public_key"`
+	DerivationPath  string                  `json:"derivation_path"`
+}
+
+func (utxo *manifestUTXO) UnmarshalJSON(data []byte) error {
+	type alias manifestUTXO
+	aux := struct {
+		*alias
+		TransactionIDCamel   string                  `json:"transactionId"`
+		AmountSompiCamel     uint64                  `json:"amountSompi"`
+		ScriptPublicKeyCamel manifestScriptPublicKey `json:"scriptPublicKey"`
+		DerivationPathCamel  string                  `json:"derivationPath"`
+	}{alias: (*alias)(utxo)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if utxo.TransactionID == "" {
+		utxo.TransactionID = aux.TransactionIDCamel
+	}
+	if utxo.AmountSompi == 0 {
+		utxo.AmountSompi = aux.AmountSompiCamel
+	}
+	if utxo.ScriptPublicKey.Script == "" {
+		utxo.ScriptPublicKey = aux.ScriptPublicKeyCamel
+	}
+	if utxo.DerivationPath == "" {
+		utxo.DerivationPath = aux.DerivationPathCamel
+	}
+	return nil
+}
+
+type manifestScriptPublicKey struct {
+	Version uint16 `json:"version"`
+	Script  string `json:"script"`
 }
 
 type manifestExit struct {
@@ -295,10 +426,48 @@ type manifestExit struct {
 	AmountSompi uint64 `json:"amount_sompi"`
 }
 
+func (exit *manifestExit) UnmarshalJSON(data []byte) error {
+	type alias manifestExit
+	aux := struct {
+		*alias
+		MessageIDCamel   string `json:"messageId"`
+		AmountSompiCamel uint64 `json:"amountSompi"`
+	}{alias: (*alias)(exit)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if exit.MessageID == "" {
+		exit.MessageID = aux.MessageIDCamel
+	}
+	if exit.AmountSompi == 0 {
+		exit.AmountSompi = aux.AmountSompiCamel
+	}
+	return nil
+}
+
 type manifestChange struct {
 	DerivationPath string `json:"derivation_path"`
 	AmountSompi    uint64 `json:"amount_sompi"`
 	Address        string `json:"address"`
+}
+
+func (change *manifestChange) UnmarshalJSON(data []byte) error {
+	type alias manifestChange
+	aux := struct {
+		*alias
+		DerivationPathCamel string `json:"derivationPath"`
+		AmountSompiCamel    uint64 `json:"amountSompi"`
+	}{alias: (*alias)(change)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if change.DerivationPath == "" {
+		change.DerivationPath = aux.DerivationPathCamel
+	}
+	if change.AmountSompi == 0 {
+		change.AmountSompi = aux.AmountSompiCamel
+	}
+	return nil
 }
 
 type unsignedVerifyReport struct {
@@ -309,6 +478,33 @@ type unsignedVerifyReport struct {
 	Outputs      int    `json:"outputs"`
 	SignedInputs int    `json:"signed_inputs"`
 	FullySigned  bool   `json:"fully_signed"`
+}
+
+func (report *unsignedVerifyReport) UnmarshalJSON(data []byte) error {
+	type alias unsignedVerifyReport
+	aux := struct {
+		*alias
+		KaspaTxIDCamel    string `json:"kaspaTxId"`
+		PayloadNonceCamel uint64 `json:"payloadNonce"`
+		SignedInputsCamel int    `json:"signedInputs"`
+		FullySignedCamel  bool   `json:"fullySigned"`
+	}{alias: (*alias)(report)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if report.KaspaTxID == "" {
+		report.KaspaTxID = aux.KaspaTxIDCamel
+	}
+	if report.PayloadNonce == 0 {
+		report.PayloadNonce = aux.PayloadNonceCamel
+	}
+	if report.SignedInputs == 0 {
+		report.SignedInputs = aux.SignedInputsCamel
+	}
+	if !report.FullySigned {
+		report.FullySigned = aux.FullySignedCamel
+	}
+	return nil
 }
 
 type expectedPayment struct {
