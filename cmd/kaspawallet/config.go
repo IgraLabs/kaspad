@@ -16,6 +16,8 @@ const (
 	sweepSubCmd                     = "sweep"
 	createUnsignedTransactionSubCmd = "create-unsigned-transaction"
 	signSubCmd                      = "sign"
+	verifyExitProposalSubCmd        = "verify-exit-proposal"
+	signExitProposalSubCmd          = "sign-exit-proposal"
 	broadcastSubCmd                 = "broadcast"
 	parseSubCmd                     = "parse"
 	showAddressesSubCmd             = "show-addresses"
@@ -97,6 +99,30 @@ type signConfig struct {
 	Password        string `long:"password" short:"p" description:"Wallet password"`
 	Transaction     string `long:"transaction" short:"t" description:"The unsigned transaction(s) to sign on (encoded in hex)"`
 	TransactionFile string `long:"transaction-file" short:"F" description:"The file containing the unsigned transaction(s) to sign on (encoded in hex)"`
+	config.NetworkFlags
+}
+
+type verifyExitProposalConfig struct {
+	KeysFile     string `long:"keys-file" short:"f" description:"Keys file location (default: ~/.kaspawallet/keys.json (*nix), %USERPROFILE%\\AppData\\Local\\Kaspawallet\\key.json (Windows))"`
+	ProposalFile string `long:"proposal-file" description:"File containing the safe-service Kaspa proposal JSON"`
+	EvidenceFile string `long:"evidence-file" description:"File containing the safe-service Kaspa exit evidence JSON"`
+	SafeURL      string `long:"safe-url" description:"safe-transaction-service base URL, e.g. http://safe-api:8888"`
+	ProposalHash string `long:"proposal-hash" description:"Proposal hash to fetch from safe-transaction-service"`
+	IgraRPCURL   string `long:"igra-rpc-url" description:"Optional Igra JSON-RPC URL for independent chain checks"`
+	KaspaRPCURL  string `long:"kaspa-rpc-url" description:"Optional Kaspa gRPC URL for UTXO liveness checks"`
+	JSON         bool   `long:"json" description:"Print verification result as JSON"`
+	config.NetworkFlags
+}
+
+type signExitProposalConfig struct {
+	KeysFile     string `long:"keys-file" short:"f" description:"Keys file location (default: ~/.kaspawallet/keys.json (*nix), %USERPROFILE%\\AppData\\Local\\Kaspawallet\\key.json (Windows))"`
+	Password     string `long:"password" short:"p" description:"Wallet password"`
+	ProposalFile string `long:"proposal-file" description:"File containing the safe-service Kaspa proposal JSON"`
+	EvidenceFile string `long:"evidence-file" description:"File containing the safe-service Kaspa exit evidence JSON"`
+	SafeURL      string `long:"safe-url" description:"safe-transaction-service base URL, e.g. http://safe-api:8888"`
+	ProposalHash string `long:"proposal-hash" description:"Proposal hash to fetch from safe-transaction-service"`
+	IgraRPCURL   string `long:"igra-rpc-url" description:"Optional Igra JSON-RPC URL for independent chain checks"`
+	KaspaRPCURL  string `long:"kaspa-rpc-url" description:"Optional Kaspa gRPC URL for UTXO liveness checks"`
 	config.NetworkFlags
 }
 
@@ -204,6 +230,14 @@ func parseCommandLine() (subCommand string, config interface{}) {
 	parser.AddCommand(signSubCmd, "Sign the given partially signed transaction",
 		"Sign the given partially signed transaction", signConf)
 
+	verifyExitProposalConf := &verifyExitProposalConfig{}
+	parser.AddCommand(verifyExitProposalSubCmd, "Verify an Igra exit proposal",
+		"Verify a safe-service Kaspa exit proposal and its evidence without using private keys", verifyExitProposalConf)
+
+	signExitProposalConf := &signExitProposalConfig{}
+	parser.AddCommand(signExitProposalSubCmd, "Verify and sign an Igra exit proposal",
+		"Verify a safe-service Kaspa exit proposal and sign it only if all local checks pass", signExitProposalConf)
+
 	broadcastConf := &broadcastConfig{DaemonAddress: defaultListen}
 	parser.AddCommand(broadcastSubCmd, "Broadcast the given transaction",
 		"Broadcast the given transaction", broadcastConf)
@@ -302,6 +336,28 @@ func parseCommandLine() (subCommand string, config interface{}) {
 			printErrorAndExit(err)
 		}
 		config = signConf
+	case verifyExitProposalSubCmd:
+		combineNetworkFlags(&verifyExitProposalConf.NetworkFlags, &cfg.NetworkFlags)
+		err := verifyExitProposalConf.ResolveNetwork(parser)
+		if err != nil {
+			printErrorAndExit(err)
+		}
+		err = validateVerifyExitProposalConfig(verifyExitProposalConf)
+		if err != nil {
+			printErrorAndExit(err)
+		}
+		config = verifyExitProposalConf
+	case signExitProposalSubCmd:
+		combineNetworkFlags(&signExitProposalConf.NetworkFlags, &cfg.NetworkFlags)
+		err := signExitProposalConf.ResolveNetwork(parser)
+		if err != nil {
+			printErrorAndExit(err)
+		}
+		err = validateSignExitProposalConfig(signExitProposalConf)
+		if err != nil {
+			printErrorAndExit(err)
+		}
+		config = signExitProposalConf
 	case broadcastSubCmd:
 		combineNetworkFlags(&broadcastConf.NetworkFlags, &cfg.NetworkFlags)
 		err := broadcastConf.ResolveNetwork(parser)
@@ -405,6 +461,36 @@ func validateCreateUnsignedTransactionConf(conf *createUnsignedTransactionConfig
 	}
 
 	return nil
+}
+
+func validateVerifyExitProposalConfig(conf *verifyExitProposalConfig) error {
+	return validateExitProposalSource(conf.ProposalFile, conf.EvidenceFile, conf.SafeURL, conf.ProposalHash)
+}
+
+func validateSignExitProposalConfig(conf *signExitProposalConfig) error {
+	return validateExitProposalSource(conf.ProposalFile, conf.EvidenceFile, conf.SafeURL, conf.ProposalHash)
+}
+
+func validateExitProposalSource(proposalFile, evidenceFile, safeURL, proposalHash string) error {
+	hasFiles := proposalFile != "" || evidenceFile != ""
+	hasSafe := safeURL != "" || proposalHash != ""
+
+	if hasFiles && hasSafe {
+		return errors.New("use either --proposal-file/--evidence-file or --safe-url/--proposal-hash, not both")
+	}
+	if hasFiles {
+		if proposalFile == "" || evidenceFile == "" {
+			return errors.New("both --proposal-file and --evidence-file are required in file mode")
+		}
+		return nil
+	}
+	if hasSafe {
+		if safeURL == "" || proposalHash == "" {
+			return errors.New("both --safe-url and --proposal-hash are required in safe-service mode")
+		}
+		return nil
+	}
+	return errors.New("proposal source is required: use --proposal-file/--evidence-file or --safe-url/--proposal-hash")
 }
 
 func validateSendConfig(conf *sendConfig) error {
