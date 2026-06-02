@@ -18,6 +18,8 @@ func main() {
 		err = createUnsignedTransaction(config.(*createUnsignedTransactionConfig))
 	case signSubCmd:
 		err = sign(config.(*signConfig))
+	case listExitProposalsSubCmd:
+		err = listExitProposals(config.(*listExitProposalsConfig))
 	case verifyExitProposalSubCmd:
 		err = verifyExitProposal(config.(*verifyExitProposalConfig))
 	case signExitProposalSubCmd:

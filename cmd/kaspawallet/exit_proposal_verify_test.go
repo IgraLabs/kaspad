@@ -190,8 +190,9 @@ func TestVerifyExitProposalWithGeneratedFixture(t *testing.T) {
 			map[string]interface{}{"allMatch": true, "start": map[string]interface{}{"allMatch": true}, "end": map[string]interface{}{"allMatch": true}},
 		},
 	}
-	evidence.KaspaTransaction.UnsignedManifest = manifest
-	evidence.KaspaTransaction.UnsignedVerify = unsignedVerifyReport{
+	candidate := exitProposalCandidate{}
+	candidate.UnsignedManifest = manifest
+	candidate.UnsignedVerify = unsignedVerifyReport{
 		OK:          true,
 		KaspaTxID:   kaspaTxID,
 		Inputs:      1,
@@ -212,6 +213,12 @@ func TestVerifyExitProposalWithGeneratedFixture(t *testing.T) {
 		TxIDs:             []string{kaspaTxID},
 		FeeSompi:          uint64Pointer(feeSompi),
 	}
+	proposalOrigin := exitProposalOrigin{
+		Kind:         "igra-l2-exit",
+		EvidenceHash: evidenceHash,
+		Candidate:    candidate,
+	}
+	proposal.Origin = mustJSON(t, proposalOrigin)
 
 	tempDir := t.TempDir()
 	keysPath := filepath.Join(tempDir, "keys.json")

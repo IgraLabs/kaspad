@@ -85,10 +85,102 @@ type exitProposalAPI struct {
 	BroadcastError      *string         `json:"broadcast_error"`
 }
 
+func (proposal *exitProposalAPI) UnmarshalJSON(data []byte) error {
+	type alias exitProposalAPI
+	aux := struct {
+		*alias
+		ExitBatchCamel           string          `json:"exitBatch"`
+		ExitEvidenceHashCamel    string          `json:"exitEvidenceHash"`
+		ProposalHashCamel        string          `json:"proposalHash"`
+		UnsignedBundleHexCamel   string          `json:"unsignedBundleHex"`
+		MergedBundleHexCamel     string          `json:"mergedBundleHex"`
+		TxIDsCamel               []string        `json:"txIds"`
+		InputOutpointsCamel      json.RawMessage `json:"inputOutpoints"`
+		FeeSompiCamel            *uint64         `json:"feeSompi"`
+		SignaturesRequiredCamel  uint32          `json:"signaturesRequired"`
+		SignaturesCollectedCamel uint32          `json:"signaturesCollected"`
+		BroadcastTxIDsCamel      []string        `json:"broadcastTxIds"`
+		BroadcastErrorCamel      *string         `json:"broadcastError"`
+	}{alias: (*alias)(proposal)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if proposal.ExitBatch == "" {
+		proposal.ExitBatch = aux.ExitBatchCamel
+	}
+	if proposal.ExitEvidenceHash == "" {
+		proposal.ExitEvidenceHash = aux.ExitEvidenceHashCamel
+	}
+	if proposal.ProposalHash == "" {
+		proposal.ProposalHash = aux.ProposalHashCamel
+	}
+	if proposal.UnsignedBundleHex == "" {
+		proposal.UnsignedBundleHex = aux.UnsignedBundleHexCamel
+	}
+	if proposal.MergedBundleHex == "" {
+		proposal.MergedBundleHex = aux.MergedBundleHexCamel
+	}
+	if len(proposal.TxIDs) == 0 {
+		proposal.TxIDs = aux.TxIDsCamel
+	}
+	if len(proposal.InputOutpoints) == 0 {
+		proposal.InputOutpoints = aux.InputOutpointsCamel
+	}
+	if proposal.FeeSompi == nil {
+		proposal.FeeSompi = aux.FeeSompiCamel
+	}
+	if proposal.SignaturesRequired == 0 {
+		proposal.SignaturesRequired = aux.SignaturesRequiredCamel
+	}
+	if proposal.SignaturesCollected == 0 {
+		proposal.SignaturesCollected = aux.SignaturesCollectedCamel
+	}
+	if len(proposal.BroadcastTxIDs) == 0 {
+		proposal.BroadcastTxIDs = aux.BroadcastTxIDsCamel
+	}
+	if proposal.BroadcastError == nil {
+		proposal.BroadcastError = aux.BroadcastErrorCamel
+	}
+	return nil
+}
+
+type exitProposalOrigin struct {
+	Kind         string                `json:"kind"`
+	EvidenceHash string                `json:"evidenceHash"`
+	Candidate    exitProposalCandidate `json:"candidate"`
+}
+
+type exitProposalCandidate struct {
+	ArtifactHashes         map[string]string      `json:"artifactHashes"`
+	BuildInput             map[string]interface{} `json:"buildInput"`
+	UnsignedManifest       unsignedExitManifest   `json:"unsignedManifest"`
+	UnsignedVerify         unsignedVerifyReport   `json:"unsignedVerify"`
+	WalletHexNormalization map[string]interface{} `json:"walletHexNormalization"`
+}
+
 type exitBatchAPI struct {
 	ID           string          `json:"id"`
 	EvidenceHash string          `json:"evidence_hash"`
 	Evidence     json.RawMessage `json:"evidence"`
+}
+
+func (batch *exitBatchAPI) UnmarshalJSON(data []byte) error {
+	type alias exitBatchAPI
+	aux := struct {
+		*alias
+		EvidenceHashCamel string          `json:"evidenceHash"`
+		EvidenceCamel     json.RawMessage `json:"evidence"`
+	}{alias: (*alias)(batch)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if batch.EvidenceHash == "" {
+		batch.EvidenceHash = aux.EvidenceHashCamel
+	}
+	if len(batch.Evidence) == 0 {
+		batch.Evidence = aux.EvidenceCamel
+	}
+	return nil
 }
 
 type exitProposalEvidence struct {
@@ -309,8 +401,12 @@ func verifyExitProposalWithOptions(opts exitProposalVerifyOptions) (*exitProposa
 	}
 	addCheck("evidence schema is supported")
 
-	manifest := evidence.KaspaTransaction.UnsignedManifest
-	verifyReport := evidence.KaspaTransaction.UnsignedVerify
+	candidate, err := proposalCandidateMaterial(proposal, evidence)
+	if err != nil {
+		return nil, err
+	}
+	manifest := candidate.UnsignedManifest
+	verifyReport := candidate.UnsignedVerify
 	expectedNetwork := kaspaEvidenceNetwork(opts.NetParams)
 	if evidence.Network.Kaspa != expectedNetwork {
 		return nil, errors.Errorf("evidence Kaspa network mismatch: expected %s, got %s", expectedNetwork, evidence.Network.Kaspa)
@@ -389,6 +485,32 @@ func verifyExitProposalWithOptions(opts exitProposalVerifyOptions) (*exitProposa
 		PartiallySignedTxBytes: bundleParts[0],
 		Result:                 result,
 	}, nil
+}
+
+func proposalCandidateMaterial(
+	proposal exitProposalAPI,
+	evidence exitProposalEvidence,
+) (exitProposalCandidate, error) {
+	var origin exitProposalOrigin
+	if len(proposal.Origin) != 0 && !bytes.Equal(proposal.Origin, []byte("null")) {
+		if err := json.Unmarshal(proposal.Origin, &origin); err != nil {
+			return exitProposalCandidate{}, errors.Wrap(err, "failed to decode proposal origin")
+		}
+		if origin.Candidate.UnsignedManifest.Schema != "" {
+			return origin.Candidate, nil
+		}
+	}
+
+	if evidence.KaspaTransaction.UnsignedManifest.Schema != "" {
+		return exitProposalCandidate{
+			BuildInput:             evidence.KaspaTransaction.BuildInput,
+			UnsignedManifest:       evidence.KaspaTransaction.UnsignedManifest,
+			UnsignedVerify:         evidence.KaspaTransaction.UnsignedVerify,
+			WalletHexNormalization: evidence.KaspaTransaction.WalletHexNormalization,
+		}, nil
+	}
+
+	return exitProposalCandidate{}, errors.New("proposal has no candidate unsigned manifest in origin.candidate or legacy evidence.kaspaTransaction")
 }
 
 func loadExitProposalAndEvidence(opts exitProposalVerifyOptions) (exitProposalAPI, []byte, error) {

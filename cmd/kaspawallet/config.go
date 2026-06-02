@@ -16,6 +16,7 @@ const (
 	sweepSubCmd                     = "sweep"
 	createUnsignedTransactionSubCmd = "create-unsigned-transaction"
 	signSubCmd                      = "sign"
+	listExitProposalsSubCmd         = "list-exit-proposals"
 	verifyExitProposalSubCmd        = "verify-exit-proposal"
 	signExitProposalSubCmd          = "sign-exit-proposal"
 	broadcastSubCmd                 = "broadcast"
@@ -111,6 +112,16 @@ type verifyExitProposalConfig struct {
 	IgraRPCURL   string `long:"igra-rpc-url" description:"Optional Igra JSON-RPC URL for independent chain checks"`
 	KaspaRPCURL  string `long:"kaspa-rpc-url" description:"Optional Kaspa gRPC URL for UTXO liveness checks"`
 	JSON         bool   `long:"json" description:"Print verification result as JSON"`
+	config.NetworkFlags
+}
+
+type listExitProposalsConfig struct {
+	KeysFile       string `long:"keys-file" short:"f" description:"Keys file location (default: ~/.kaspawallet/keys.json (*nix), %USERPROFILE%\\AppData\\Local\\Kaspawallet\\key.json (Windows))"`
+	SafeURL        string `long:"safe-url" description:"safe-transaction-service base URL, e.g. http://safe-api:8888" required:"true"`
+	IgraRPCURL     string `long:"igra-rpc-url" description:"Optional Igra JSON-RPC URL for independent chain checks"`
+	KaspaRPCURL    string `long:"kaspa-rpc-url" description:"Optional Kaspa gRPC URL for UTXO liveness checks"`
+	IncludeInvalid bool   `long:"include-invalid" description:"Include candidates that fail local verification"`
+	JSON           bool   `long:"json" description:"Print candidate results as JSON"`
 	config.NetworkFlags
 }
 
@@ -230,6 +241,10 @@ func parseCommandLine() (subCommand string, config interface{}) {
 	parser.AddCommand(signSubCmd, "Sign the given partially signed transaction",
 		"Sign the given partially signed transaction", signConf)
 
+	listExitProposalsConf := &listExitProposalsConfig{}
+	parser.AddCommand(listExitProposalsSubCmd, "List locally verified Igra exit proposal candidates",
+		"Fetch safe-service proposal candidates for this wallet federation and locally verify them", listExitProposalsConf)
+
 	verifyExitProposalConf := &verifyExitProposalConfig{}
 	parser.AddCommand(verifyExitProposalSubCmd, "Verify an Igra exit proposal",
 		"Verify a safe-service Kaspa exit proposal and its evidence without using private keys", verifyExitProposalConf)
@@ -336,6 +351,13 @@ func parseCommandLine() (subCommand string, config interface{}) {
 			printErrorAndExit(err)
 		}
 		config = signConf
+	case listExitProposalsSubCmd:
+		combineNetworkFlags(&listExitProposalsConf.NetworkFlags, &cfg.NetworkFlags)
+		err := listExitProposalsConf.ResolveNetwork(parser)
+		if err != nil {
+			printErrorAndExit(err)
+		}
+		config = listExitProposalsConf
 	case verifyExitProposalSubCmd:
 		combineNetworkFlags(&verifyExitProposalConf.NetworkFlags, &cfg.NetworkFlags)
 		err := verifyExitProposalConf.ResolveNetwork(parser)
